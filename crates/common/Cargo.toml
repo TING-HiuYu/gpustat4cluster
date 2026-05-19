@@ -1,0 +1,14 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Common protocol/config types for gpustat4cluster"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+toml = "0.8"
+
+[dev-dependencies]
+serde_json = "1"

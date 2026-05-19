@@ -1,0 +1,76 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [server, client]
+        arch: [amd64, arm64]
+        libc: [gnu, musl]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve target triple
+        id: triple
+        run: |
+          case "${{ matrix.arch }}-${{ matrix.libc }}" in
+            amd64-gnu) echo "target=x86_64-unknown-linux-gnu" >> "$GITHUB_OUTPUT" ;;
+            amd64-musl) echo "target=x86_64-unknown-linux-musl" >> "$GITHUB_OUTPUT" ;;
+            arm64-gnu) echo "target=aarch64-unknown-linux-gnu" >> "$GITHUB_OUTPUT" ;;
+            arm64-musl) echo "target=aarch64-unknown-linux-musl" >> "$GITHUB_OUTPUT" ;;
+            *) echo "unsupported matrix combo" >&2; exit 1 ;;
+          esac
+
+      - name: Install target
+        run: rustup target add "${{ steps.triple.outputs.target }}"
+
+      - name: Build release binaries
+        run: |
+          set -euxo pipefail
+          target="${{ steps.triple.outputs.target }}"
+          if [[ "${{ matrix.role }}" == "server" ]]; then
+            cargo build --release --target "$target" -p server
+          else
+            cargo build --release --target "$target" -p gpustat4cluster-client-backend -p gpustat4cluster-client-cli
+          fi
+
+      - name: Package artifact
+        run: |
+          set -euxo pipefail
+          version="${GITHUB_REF_NAME:-dev}"
+          target="${{ steps.triple.outputs.target }}"
+          outdir="dist"
+          pkgdir="package-root"
+          mkdir -p "$outdir" "$pkgdir/usr/local/bin" "$pkgdir/etc/gpustat4cluster" "$pkgdir/lib/systemd/system"
+
+          cp packaging/systemd/gpustat4cluster-server.service "$pkgdir/lib/systemd/system/"
+          cp packaging/systemd/gpustat4cluster-client.service "$pkgdir/lib/systemd/system/"
+
+          if [[ "${{ matrix.role }}" == "server" ]]; then
+            cp "target/$target/release/server" "$pkgdir/usr/local/bin/gpustat4cluster-server"
+          else
+            cp "target/$target/release/gpustat4cluster-client-backend" "$pkgdir/usr/local/bin/"
+            cp "target/$target/release/gpustat4cluster" "$pkgdir/usr/local/bin/gpustat4cluster-client"
+          fi
+
+          tarball="gpustat4cluster-${{ matrix.role }}-${version}-linux-${{ matrix.arch }}-${{ matrix.libc }}.tar.gz"
+          tar -C "$pkgdir" -czf "$outdir/$tarball" .
+          echo "artifact=$outdir/$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpustat4cluster-${{ matrix.role }}-${{ matrix.arch }}-${{ matrix.libc }}
+          path: dist/*.tar.gz

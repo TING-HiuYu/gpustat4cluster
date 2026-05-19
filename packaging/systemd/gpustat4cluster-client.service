@@ -1,0 +1,16 @@
+[Unit]
+Description=gpustat4cluster client backend daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gpustat4cluster
+Group=gpustat4cluster
+ExecStart=/usr/local/bin/gpustat4cluster-client-backend --config /etc/gpustat4cluster/config.toml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
