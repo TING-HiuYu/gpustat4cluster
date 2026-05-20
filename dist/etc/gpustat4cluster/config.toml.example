@@ -1,0 +1,27 @@
+[connecting]
+port_range = [30000, 40000]
+multicast_addr = "239.0.0.1:4000"
+# 0 means choose an available port inside port_range and announce it via multicast.
+kcp_port = 0
+tcp_port = 0
+heartbeat_interval = 5
+connection_idle_timeout = 10
+max_connections = 64
+kcp_retry_limit = 3
+discover_wait_secs = 5
+multicast_retry_limit = 5
+# Optional: one or more local IPv4 addresses used as multicast outbound interfaces.
+# multicast_outbound_ip = ["192.0.2.10"]
+
+[log]
+max_size = "5mb"
+
+[services]
+cache_ttl_ms = 40
+collector_interval_ms = 25
+latency_display = true
+
+[runtime]
+# Leave unset to use the dynamic loader default: libnvidia-ml.so.
+# Set this when the host only provides a versioned runtime library.
+# nvml_lib_path = "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1"
