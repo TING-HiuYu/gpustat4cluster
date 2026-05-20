@@ -1,0 +1,24 @@
+[package]
+name = "gpustat4cluster-client-backend"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+kcp-transport = ["dep:kcp2", "dep:tokio", "dep:ctrlc"]
+
+[[bin]]
+name = "gpustat4cluster-client-backend"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common" }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+socket2 = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+kcp2 = { version = "0.2.2", optional = true }
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "macros", "time", "io-util", "sync"], optional = true }
+ctrlc = { version = "3", features = ["termination"], optional = true }
