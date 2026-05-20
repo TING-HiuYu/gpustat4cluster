@@ -1,0 +1,26 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+nvml = ["dep:nvml-wrapper"]
+kcp-transport = ["dep:kcp2", "dep:tokio", "dep:ctrlc"]
+# Test-only provider for local multi-server and transport validation; production
+# builds should use real NVML and fail startup if NVML cannot initialize.
+mock-nvml = []
+
+[dependencies]
+common = { path = "../common" }
+anyhow = "1"
+toml = "0.8"
+
+serde_json = "1"
+base64 = "0.22"
+socket2 = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+nvml-wrapper = { version = "0.10", optional = true }
+kcp2 = { version = "0.2.2", optional = true }
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "macros", "time", "io-util", "sync"], optional = true }
+ctrlc = { version = "3", features = ["termination"], optional = true }
