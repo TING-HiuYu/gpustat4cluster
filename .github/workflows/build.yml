@@ -1,0 +1,282 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_target:
+        description: "Commit, branch, or tag to build"
+        required: true
+        default: "main"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  resolve-target:
+    name: resolve build target
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.meta.outputs.commit_sha }}
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_target }}
+          fetch-depth: 0
+
+      - name: Resolve target commit
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  ubuntu-deb-anylinux:
+    name: ubuntu deb and anylinux binaries
+    needs: resolve-target
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-target.outputs.commit_sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install packaging and cross tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross dpkg-dev zip
+
+      - name: Build deb packages and anylinux bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          GPUSTAT4CLUSTER_DEB_MULTIARCH=1 scripts/package-deb.sh
+          mkdir -p build-artifacts
+          cp dist/gpustat4cluster-server_*_all.deb build-artifacts/gpustat4cluster-server-multiarch.deb
+          cp dist/gpustat4cluster-client_*_all.deb build-artifacts/gpustat4cluster-client-multiarch.deb
+
+          make_anylinux_bundle() {
+            local arch="$1"
+            local server_bin="$2"
+            local client_bin="$3"
+            local backend_bin="$4"
+            local tmpdir
+            tmpdir="$(mktemp -d)"
+            mkdir -p "$tmpdir/bin" "$tmpdir/etc/gpustat4cluster"
+            cp "$server_bin" "$tmpdir/bin/gpustat4cluster-server"
+            cp "$client_bin" "$tmpdir/bin/gpustat4cluster-client"
+            cp "$backend_bin" "$tmpdir/bin/gpustat4cluster-client-backend"
+            cp dist/etc/gpustat4cluster/server.toml.example "$tmpdir/etc/gpustat4cluster/server.toml.example"
+            cp dist/etc/gpustat4cluster/client.toml.example "$tmpdir/etc/gpustat4cluster/client.toml.example"
+            (cd "$tmpdir" && zip -qr "${GITHUB_WORKSPACE}/build-artifacts/gpustat4cluster-server&client-anylinux-${arch}.zip" .)
+            rm -rf "$tmpdir"
+          }
+
+          make_anylinux_bundle \
+            x86_64 \
+            target/release/server \
+            target/release/gpustat4cluster \
+            target/release/gpustat4cluster-client-backend
+          make_anylinux_bundle \
+            aarch64 \
+            target/aarch64-unknown-linux-gnu/release/server \
+            target/aarch64-unknown-linux-gnu/release/gpustat4cluster \
+            target/aarch64-unknown-linux-gnu/release/gpustat4cluster-client-backend
+
+      - name: Upload server deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpustat4cluster-server-multiarch.deb
+          path: build-artifacts/gpustat4cluster-server-multiarch.deb
+
+      - name: Upload client deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpustat4cluster-client-multiarch.deb
+          path: build-artifacts/gpustat4cluster-client-multiarch.deb
+
+      - name: Upload x86_64 anylinux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpustat4cluster-server&client-anylinux-x86_64.zip
+          path: build-artifacts/gpustat4cluster-server&client-anylinux-x86_64.zip
+
+      - name: Upload aarch64 anylinux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpustat4cluster-server&client-anylinux-aarch64.zip
+          path: build-artifacts/gpustat4cluster-server&client-anylinux-aarch64.zip
+
+  redhat-rpm:
+    name: redhat rpm packages
+    needs: resolve-target
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-target.outputs.commit_sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install packaging and cross tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
+
+      - name: Build rpm packages
+        run: |
+          set -euo pipefail
+          GPUSTAT4CLUSTER_RPM_MULTIARCH=1 scripts/package-rpm.sh
+          mkdir -p build-artifacts
+          cp dist/gpustat4cluster-server-*.noarch.rpm build-artifacts/gpustat4cluster-server-multiarch.rpm
+          cp dist/gpustat4cluster-client-*.noarch.rpm build-artifacts/gpustat4cluster-client-multiarch.rpm
+
+      - name: Upload server rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpustat4cluster-server-multiarch.rpm
+          path: build-artifacts/gpustat4cluster-server-multiarch.rpm
+
+      - name: Upload client rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpustat4cluster-client-multiarch.rpm
+          path: build-artifacts/gpustat4cluster-client-multiarch.rpm
+
+  archlinux-client:
+    name: archlinux client package
+    needs: resolve-target
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-target.outputs.commit_sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
+
+      - name: Build Arch Linux client package
+        run: |
+          set -euo pipefail
+          scripts/package-archlinux-client.sh
+          mkdir -p build-artifacts
+          cp dist/*.pkg.tar.zst build-artifacts/gpustat4cluster-client-archlinux-multiarch.pkg.tar.zst
+
+      - name: Upload Arch Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpustat4cluster-client-archlinux-multiarch.pkg.tar.zst
+          path: build-artifacts/gpustat4cluster-client-archlinux-multiarch.pkg.tar.zst
+
+  macos-client:
+    name: macos multiarch client
+    needs: resolve-target
+    runs-on: macos-latest
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-target.outputs.commit_sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Build per-arch client binaries
+        run: |
+          set -euxo pipefail
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo build --locked --release --target "$target" -p gpustat4cluster-client-backend --features kcp-transport
+            cargo build --locked --release --target "$target" -p gpustat4cluster-client-cli
+          done
+
+      - name: Create universal client package
+        run: |
+          set -euxo pipefail
+          pkgdir="package-root"
+          mkdir -p "build-artifacts" "$pkgdir/bin" "$pkgdir/etc/gpustat4cluster"
+          lipo -create \
+            target/x86_64-apple-darwin/release/gpustat4cluster \
+            target/aarch64-apple-darwin/release/gpustat4cluster \
+            -output "$pkgdir/bin/gpustat4cluster-client"
+          lipo -create \
+            target/x86_64-apple-darwin/release/gpustat4cluster-client-backend \
+            target/aarch64-apple-darwin/release/gpustat4cluster-client-backend \
+            -output "$pkgdir/bin/gpustat4cluster-client-backend"
+          cp dist/etc/gpustat4cluster/client.toml.example "$pkgdir/etc/gpustat4cluster/client.toml.example"
+          cp dist/etc/gpustat4cluster/client.toml.example "$pkgdir/etc/gpustat4cluster/client.toml"
+          tar -C "$pkgdir" -czf "build-artifacts/gpustat4cluster-client-macos-multiarch.tar.gz" .
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpustat4cluster-client-macos-multiarch.tar.gz
+          path: build-artifacts/gpustat4cluster-client-macos-multiarch.tar.gz
+
+  windows-client:
+    name: windows multiarch client gnullvm
+    needs: resolve-target
+    runs-on: windows-latest
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-target.outputs.commit_sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnullvm,aarch64-pc-windows-gnullvm
+
+      - name: Install LLVM-MinGW
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "20251007"
+          $zip = "llvm-mingw-$version-ucrt-x86_64.zip"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$version/$zip"
+          Invoke-WebRequest $url -OutFile $zip
+          Expand-Archive $zip -DestinationPath .
+          $root = Join-Path $PWD.Path "llvm-mingw-$version-ucrt-x86_64\bin"
+          echo $root | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build client binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --locked --release --target x86_64-pc-windows-gnullvm -p gpustat4cluster-client-cli
+          cargo build --locked --release --target aarch64-pc-windows-gnullvm -p gpustat4cluster-client-cli
+
+      - name: Package Windows client
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force build-artifacts, package-root\bin, package-root\etc\gpustat4cluster | Out-Null
+          Copy-Item target\x86_64-pc-windows-gnullvm\release\gpustat4cluster.exe package-root\bin\gpustat4cluster-client-x86_64.exe
+          Copy-Item target\aarch64-pc-windows-gnullvm\release\gpustat4cluster.exe package-root\bin\gpustat4cluster-client-aarch64.exe
+          Copy-Item dist\etc\gpustat4cluster\client.toml.example package-root\etc\gpustat4cluster\client.toml.example
+          Copy-Item dist\etc\gpustat4cluster\client.toml.example package-root\etc\gpustat4cluster\client.toml
+          Compress-Archive -Path package-root\* -DestinationPath "build-artifacts\gpustat4cluster-client-windows-multiarch.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpustat4cluster-client-windows-multiarch.zip
+          path: build-artifacts/gpustat4cluster-client-windows-multiarch.zip
