@@ -1,0 +1,5 @@
+[target.x86_64-pc-windows-gnullvm]
+linker = "x86_64-w64-mingw32-clang"
+
+[target.aarch64-pc-windows-gnullvm]
+linker = "aarch64-w64-mingw32-clang"

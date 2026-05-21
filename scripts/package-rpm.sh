@@ -190,7 +190,10 @@ stage_role_files() {
 }
 
 write_spec() {
-  local spec="$1" role="$2" package="gpustat4cluster-${role}" summary="gpustat4cluster ${role} daemon"
+  local spec="$1"
+  local role="$2"
+  local package="gpustat4cluster-${role}"
+  local summary="gpustat4cluster ${role} daemon"
   if [[ "$role" == "client" ]]; then
     summary="gpustat4cluster client backend and CLI"
   fi
@@ -203,6 +206,10 @@ Summary:        $summary
 License:        MIT
 BuildArch:      noarch
 Requires:       systemd
+%global __brp_strip %{nil}
+%global __brp_strip_static_archive %{nil}
+%global __brp_strip_comment_note %{nil}
+%global _binaries_in_noarch_packages_terminate_build 0
 
 %description
 gpustat4cluster provides low-latency GPU status collection and display across a cluster.
@@ -299,13 +306,16 @@ SPECEOF
   cat >>"$spec" <<SPECEOF
 
 %changelog
-* Thu Jan 01 1970 gpustat4cluster maintainers <root@localhost> - $VERSION-$REVISION
+* Thu May 21 2026 gpustat4cluster maintainers <root@localhost> - $VERSION-$REVISION
 - Automated release package.
 SPECEOF
 }
 
 package_role() {
-  local role="$1" topdir="$TMP_DIR/rpmbuild-${role}" pkgroot="$topdir/SOURCES/root" spec="$topdir/SPECS/gpustat4cluster-${role}.spec"
+  local role="$1"
+  local topdir="$TMP_DIR/rpmbuild-${role}"
+  local pkgroot="$topdir/SOURCES/root"
+  local spec="$topdir/SPECS/gpustat4cluster-${role}.spec"
   mkdir -p "$topdir/BUILD" "$topdir/BUILDROOT" "$topdir/RPMS" "$topdir/SOURCES" "$topdir/SPECS" "$topdir/SRPMS"
   stage_role_files "$pkgroot" "$role"
   find "$pkgroot" -type d -exec chmod 0755 {} +

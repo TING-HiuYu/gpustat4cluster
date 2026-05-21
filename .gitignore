@@ -19,3 +19,12 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Local release/package outputs
+dist/*.deb
+dist/*.rpm
+dist/*.tar.gz
+dist/*.zip
+dist/*.pkg.tar.zst
+dist/usr/
+dist/etc/gpustat4cluster/gpustat4cluster.env.example

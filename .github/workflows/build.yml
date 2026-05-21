@@ -3,55 +3,118 @@ name: build
 on:
   workflow_dispatch:
     inputs:
-      channel:
-        description: "Existing GitHub Release tag to attach artifacts to"
+      commit_target:
+        description: "Commit, branch, or tag to release"
         required: true
-        default: pre
+        default: "main"
+        type: string
+      release_type:
+        description: "Release type"
+        required: true
+        default: "pre-release"
         type: choice
         options:
-          - pre
+          - pre-release
           - release
 
 permissions:
   contents: write
 
 jobs:
-  test:
+  validate:
+    name: validate release target
     runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.meta.outputs.commit_sha }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
-      - name: Checkout
+      - name: Checkout target
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_target }}
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run workspace tests
-        run: cargo test --workspace
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          commit_sha="$(git rev-parse HEAD)"
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/server/Cargo.toml | head -1)"
+          if [[ -z "$version" ]]; then
+            echo "could not read version from crates/server/Cargo.toml" >&2
+            exit 1
+          fi
+          for manifest in crates/common/Cargo.toml crates/client-backend/Cargo.toml crates/client-cli/Cargo.toml; do
+            other="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$manifest" | head -1)"
+            if [[ "$other" != "$version" ]]; then
+              echo "version mismatch: $manifest has $other, expected $version" >&2
+              exit 1
+            fi
+          done
+          tag="v$version"
+          prerelease="false"
+          if [[ "${{ inputs.release_type }}" == "pre-release" ]]; then
+            prerelease="true"
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "tag already exists on origin: $tag" >&2
+            exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release already exists: $tag" >&2
+            exit 1
+          fi
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
-      - name: Build server without warnings gate
-        run: cargo build --locked -p server
+      - name: Validate release notes
+        run: |
+          set -euo pipefail
+          test -s release_note.md
 
-      - name: Build client backend without warnings gate
-        run: cargo build --locked -p gpustat4cluster-client-backend
+      - name: Check formatting and workspace build
+        run: |
+          set -euo pipefail
+          cargo fmt --check
+          cargo check --workspace
 
-      - name: Run server KCP feature tests
-        run: cargo test -p server --features kcp-transport
+      - name: Check shell scripts
+        run: |
+          set -euo pipefail
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
 
-      - name: Run client backend KCP feature tests
-        run: cargo test -p gpustat4cluster-client-backend --features kcp-transport
+      - name: Check workflow YAML
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user pyyaml
+          python3 - <<'PY'
+          import pathlib
+          import yaml
+          for path in pathlib.Path('.github/workflows').glob('*.yml'):
+              yaml.safe_load(path.read_text())
+          PY
 
-      - name: Check server KCP plus NVML features
-        run: cargo check -p server --features "kcp-transport nvml"
-
-      - name: Smoke local release package artifact
-        run: bash scripts/smoke-package-artifact.sh
-
-  ubuntu-deb:
-    name: ubuntu multiarch deb
+  ubuntu-deb-anylinux:
+    name: ubuntu deb and anylinux binaries
+    needs: validate
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout target
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit_sha }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -61,23 +124,60 @@ jobs:
       - name: Install packaging and cross tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross dpkg-dev
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross dpkg-dev zip
 
-      - name: Build deb packages
-        run: GPUSTAT4CLUSTER_DEB_MULTIARCH=1 scripts/package-deb.sh
+      - name: Build deb packages and anylinux bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          GPUSTAT4CLUSTER_DEB_MULTIARCH=1 scripts/package-deb.sh
+          mkdir -p release-assets
+          cp dist/gpustat4cluster-server_*_all.deb release-assets/gpustat4cluster-server-multiarch.deb
+          cp dist/gpustat4cluster-client_*_all.deb release-assets/gpustat4cluster-client-multiarch.deb
 
-      - name: Upload deb artifacts
+          make_anylinux_bundle() {
+            local arch="$1"
+            local server_bin="$2"
+            local client_bin="$3"
+            local backend_bin="$4"
+            local tmpdir
+            tmpdir="$(mktemp -d)"
+            mkdir -p "$tmpdir/bin" "$tmpdir/etc/gpustat4cluster"
+            cp "$server_bin" "$tmpdir/bin/gpustat4cluster-server"
+            cp "$client_bin" "$tmpdir/bin/gpustat4cluster-client"
+            cp "$backend_bin" "$tmpdir/bin/gpustat4cluster-client-backend"
+            cp dist/etc/gpustat4cluster/server.toml.example "$tmpdir/etc/gpustat4cluster/server.toml.example"
+            cp dist/etc/gpustat4cluster/client.toml.example "$tmpdir/etc/gpustat4cluster/client.toml.example"
+            (cd "$tmpdir" && zip -qr "${GITHUB_WORKSPACE}/release-assets/gpustat4cluster-server&client-anylinux-${arch}.zip" .)
+            rm -rf "$tmpdir"
+          }
+
+          make_anylinux_bundle \
+            x86_64 \
+            target/release/server \
+            target/release/gpustat4cluster \
+            target/release/gpustat4cluster-client-backend
+          make_anylinux_bundle \
+            aarch64 \
+            target/aarch64-unknown-linux-gnu/release/server \
+            target/aarch64-unknown-linux-gnu/release/gpustat4cluster \
+            target/aarch64-unknown-linux-gnu/release/gpustat4cluster-client-backend
+
+      - name: Upload Ubuntu/Debian and anylinux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: gpustat4cluster-ubuntu-deb
-          path: dist/*.deb
+          name: gpustat4cluster-ubuntu-deb-anylinux
+          path: release-assets/*
 
   redhat-rpm:
-    name: redhat multiarch rpm
+    name: redhat rpm packages
+    needs: validate
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout target
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit_sha }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -90,20 +190,28 @@ jobs:
           sudo apt-get install -y rpm gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Build rpm packages
-        run: GPUSTAT4CLUSTER_RPM_MULTIARCH=1 scripts/package-rpm.sh
+        run: |
+          set -euo pipefail
+          GPUSTAT4CLUSTER_RPM_MULTIARCH=1 scripts/package-rpm.sh
+          mkdir -p release-assets
+          cp dist/gpustat4cluster-server-*.noarch.rpm release-assets/gpustat4cluster-server-multiarch.rpm
+          cp dist/gpustat4cluster-client-*.noarch.rpm release-assets/gpustat4cluster-client-multiarch.rpm
 
-      - name: Upload rpm artifacts
+      - name: Upload RedHat/CentOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: gpustat4cluster-redhat-rpm
-          path: dist/*.rpm
+          path: release-assets/*
 
   archlinux-client:
     name: archlinux client package
+    needs: validate
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout target
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit_sha }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -114,20 +222,27 @@ jobs:
           sudo apt-get install -y zstd
 
       - name: Build Arch Linux client package
-        run: scripts/package-archlinux-client.sh
+        run: |
+          set -euo pipefail
+          scripts/package-archlinux-client.sh
+          mkdir -p release-assets
+          cp dist/*.pkg.tar.zst release-assets/gpustat4cluster-client-archlinux-multiarch.pkg.tar.zst
 
       - name: Upload Arch Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: gpustat4cluster-archlinux-client
-          path: dist/*.pkg.tar.zst
+          path: release-assets/*
 
   macos-client:
     name: macos multiarch client
+    needs: validate
     runs-on: macos-latest
     steps:
-      - name: Checkout
+      - name: Checkout target
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit_sha }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -142,12 +257,11 @@ jobs:
             cargo build --locked --release --target "$target" -p gpustat4cluster-client-cli
           done
 
-      - name: Create universal client binaries
+      - name: Create universal client package
         run: |
           set -euxo pipefail
-          version="${GITHUB_REF_NAME:-dev}"
           pkgdir="package-root"
-          mkdir -p "dist" "$pkgdir/bin" "$pkgdir/etc/gpustat4cluster"
+          mkdir -p "release-assets" "$pkgdir/bin" "$pkgdir/etc/gpustat4cluster"
           lipo -create \
             target/x86_64-apple-darwin/release/gpustat4cluster \
             target/aarch64-apple-darwin/release/gpustat4cluster \
@@ -158,39 +272,45 @@ jobs:
             -output "$pkgdir/bin/gpustat4cluster-client-backend"
           cp dist/etc/gpustat4cluster/client.toml.example "$pkgdir/etc/gpustat4cluster/client.toml.example"
           cp dist/etc/gpustat4cluster/client.toml.example "$pkgdir/etc/gpustat4cluster/client.toml"
-          tar -C "$pkgdir" -czf "dist/gpustat4cluster-client-${version}-macos-universal.tar.gz" .
+          tar -C "$pkgdir" -czf "release-assets/gpustat4cluster-client-macos-multiarch.tar.gz" .
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gpustat4cluster-macos-client-universal
-          path: dist/*.tar.gz
+          name: gpustat4cluster-macos-client
+          path: release-assets/*
 
   windows-client:
     name: windows multiarch client gnullvm
+    needs: validate
     runs-on: windows-latest
     steps:
-      - name: Checkout
+      - name: Checkout target
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit_sha }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnullvm,aarch64-pc-windows-gnullvm
 
-      - name: Install LLVM-MinGW toolchains
-        uses: msys2/setup-msys2@v2
-        with:
-          update: true
-          install: >-
-            mingw-w64-clang-x86_64-toolchain
-            mingw-w64-clang-aarch64-toolchain
+      - name: Install LLVM-MinGW
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "20251007"
+          $zip = "llvm-mingw-$version-ucrt-x86_64.zip"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$version/$zip"
+          Invoke-WebRequest $url -OutFile $zip
+          Expand-Archive $zip -DestinationPath .
+          $root = Join-Path $PWD.Path "llvm-mingw-$version-ucrt-x86_64\bin"
+          echo $root | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build client binaries
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $env:PATH = "C:\msys64\clang64\bin;C:\msys64\clangarm64\bin;$env:PATH"
           cargo build --locked --release --target x86_64-pc-windows-gnullvm -p gpustat4cluster-client-cli
           cargo build --locked --release --target aarch64-pc-windows-gnullvm -p gpustat4cluster-client-cli
 
@@ -198,70 +318,104 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "dev" }
-          New-Item -ItemType Directory -Force dist, package-root\bin, package-root\etc\gpustat4cluster | Out-Null
+          New-Item -ItemType Directory -Force release-assets, package-root\bin, package-root\etc\gpustat4cluster | Out-Null
           Copy-Item target\x86_64-pc-windows-gnullvm\release\gpustat4cluster.exe package-root\bin\gpustat4cluster-client-x86_64.exe
           Copy-Item target\aarch64-pc-windows-gnullvm\release\gpustat4cluster.exe package-root\bin\gpustat4cluster-client-aarch64.exe
           Copy-Item dist\etc\gpustat4cluster\client.toml.example package-root\etc\gpustat4cluster\client.toml.example
           Copy-Item dist\etc\gpustat4cluster\client.toml.example package-root\etc\gpustat4cluster\client.toml
-          Compress-Archive -Path package-root\* -DestinationPath "dist\gpustat4cluster-client-$version-windows-multiarch.zip" -Force
+          Compress-Archive -Path package-root\* -DestinationPath "release-assets\gpustat4cluster-client-windows-multiarch.zip" -Force
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gpustat4cluster-windows-client-multiarch-gnullvm
-          path: dist/*.zip
+          name: gpustat4cluster-windows-client
+          path: release-assets/*
 
-
-  publish:
-    name: attach artifacts to ${{ github.event.inputs.channel }}
+  test:
+    name: test after build
     needs:
-      - test
-      - ubuntu-deb
+      - validate
+      - ubuntu-deb-anylinux
       - redhat-rpm
       - archlinux-client
       - macos-client
       - windows-client
     runs-on: ubuntu-latest
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
+      - name: Checkout target
+        uses: actions/checkout@v4
         with:
-          path: dist
-          merge-multiple: true
+          ref: ${{ needs.validate.outputs.commit_sha }}
 
-      - name: Resolve release metadata
-        id: meta
-        shell: bash
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust tests
         run: |
           set -euo pipefail
-          channel="${{ github.event.inputs.channel }}"
-          if [[ "$channel" != "release" && "$channel" != "pre" ]]; then
-            echo "unsupported channel: $channel" >&2
-            exit 1
-          fi
-          if [[ "$channel" == "pre" ]]; then
-            prerelease="true"
-            title="gpustat4cluster pre-release"
-          else
-            prerelease="false"
-            title="gpustat4cluster release"
-          fi
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-          echo "tag=$channel" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
-          echo "title=$title" >> "$GITHUB_OUTPUT"
+          cargo test --workspace
+          cargo test -p server --features kcp-transport
+          cargo test -p gpustat4cluster-client-backend --features kcp-transport
+          cargo check -p server --features "kcp-transport nvml"
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          name: ${{ steps.meta.outputs.title }}
-          prerelease: ${{ steps.meta.outputs.prerelease }}
-          files: dist/*
-          body: |
-            Automated gpustat4cluster ${{ steps.meta.outputs.channel }} build.
+          path: release-assets
+          merge-multiple: true
 
-            Commit: ${{ github.sha }}
-            Trigger: manual workflow_dispatch / ${{ github.event.inputs.channel }}
+      - name: Verify release artifact names
+        run: |
+          set -euo pipefail
+          expected=(
+            "gpustat4cluster-server-multiarch.deb"
+            "gpustat4cluster-client-multiarch.deb"
+            "gpustat4cluster-server-multiarch.rpm"
+            "gpustat4cluster-client-multiarch.rpm"
+            "gpustat4cluster-client-archlinux-multiarch.pkg.tar.zst"
+            "gpustat4cluster-client-macos-multiarch.tar.gz"
+            "gpustat4cluster-client-windows-multiarch.zip"
+            "gpustat4cluster-server&client-anylinux-x86_64.zip"
+            "gpustat4cluster-server&client-anylinux-aarch64.zip"
+          )
+          for file in "${expected[@]}"; do
+            test -s "release-assets/$file"
+          done
+
+  publish:
+    name: create release and upload attachments
+    needs:
+      - validate
+      - test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create tag and release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          TARGET_SHA: ${{ needs.validate.outputs.commit_sha }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$TARGET_SHA" -m "gpustat4cluster $TAG"
+          git push origin "refs/tags/$TAG"
+          args=(release create "$TAG" release-assets/* --target "$TARGET_SHA" --title "gpustat4cluster $TAG" --notes-file release_note.md)
+          if [[ "$PRERELEASE" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          gh "${args[@]}"
