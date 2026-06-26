@@ -28,6 +28,7 @@ jobs:
       commit_sha: ${{ steps.meta.outputs.commit_sha }}
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
+      tag_exists: ${{ steps.meta.outputs.tag_exists }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
       - name: Checkout target
@@ -60,13 +61,36 @@ jobs:
             fi
           done
           tag="v$version"
+          input_target="${{ inputs.commit_target }}"
+          target_tag=""
+          case "$input_target" in
+            refs/tags/v*) target_tag="${input_target#refs/tags/}" ;;
+            v[0-9]*)
+              if git rev-parse -q --verify "refs/tags/$input_target" >/dev/null; then
+                target_tag="$input_target"
+              fi
+              ;;
+          esac
+          tag_exists="false"
+          if [[ -n "$target_tag" ]]; then
+            if [[ "$target_tag" != "$tag" ]]; then
+              echo "release target tag $target_tag does not match Cargo version $version; expected $tag" >&2
+              exit 1
+            fi
+            tag_commit="$(git rev-list -n 1 "$target_tag")"
+            if [[ "$tag_commit" != "$commit_sha" ]]; then
+              echo "release target tag $target_tag resolves to $tag_commit, but checkout resolved to $commit_sha" >&2
+              exit 1
+            fi
+            tag_exists="true"
+          elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "tag already exists on origin: $tag" >&2
+            echo "Use commit_target=$tag to release that existing tag, or bump Cargo.toml to the next version." >&2
+            exit 1
+          fi
           prerelease="false"
           if [[ "${{ inputs.release_type }}" == "pre-release" ]]; then
             prerelease="true"
-          fi
-          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-            echo "tag already exists on origin: $tag" >&2
-            exit 1
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release already exists: $tag" >&2
@@ -75,6 +99,7 @@ jobs:
           echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag_exists=$tag_exists" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
       - name: Validate release notes
@@ -406,14 +431,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.validate.outputs.tag }}
+          TAG_EXISTS: ${{ needs.validate.outputs.tag_exists }}
           TARGET_SHA: ${{ needs.validate.outputs.commit_sha }}
           PRERELEASE: ${{ needs.validate.outputs.prerelease }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" "$TARGET_SHA" -m "gpustat4cluster $TAG"
-          git push origin "refs/tags/$TAG"
+          if [[ "$TAG_EXISTS" != "true" ]]; then
+            git tag -a "$TAG" "$TARGET_SHA" -m "gpustat4cluster $TAG"
+            git push origin "refs/tags/$TAG"
+          fi
           args=(release create "$TAG" release-assets/* --target "$TARGET_SHA" --title "gpustat4cluster $TAG" --notes-file release_note.md)
           if [[ "$PRERELEASE" == "true" ]]; then
             args+=(--prerelease)

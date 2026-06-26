@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crc32fast",
  "rkyv",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "gpustat4cluster-client-backend"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "chrono",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "gpustat4cluster-client-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "common",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "base64",

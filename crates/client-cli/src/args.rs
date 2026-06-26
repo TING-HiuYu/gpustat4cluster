@@ -47,7 +47,7 @@ pub fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
     while i < args.len() {
         match args[i].as_str() {
             "-h" | "--help" => return Err(help_text().to_string()),
-            "-v" | "--version" => return Err("gpustat4cluster 0.1.0".to_string()),
+            "-v" | "--version" => return Err("gpustat4cluster 0.1.1".to_string()),
             "-n" => {
                 i += 1;
                 opts.node_filter = Some(required_value(&args, i, "-n")?.to_string());
