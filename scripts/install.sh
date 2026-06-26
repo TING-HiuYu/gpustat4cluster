@@ -164,10 +164,8 @@ install_one_tar() {
 
 write_default_config() {
   local cfg="$ETC_DIR/config.toml"
-  local env_file="$ETC_DIR/gpustat4cluster.env"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[dry-run] init config: $cfg"
-    echo "[dry-run] init env example: $env_file"
     return 0
   fi
 
@@ -198,13 +196,9 @@ cache_ttl_ms = 40
 EOF
   fi
 
-  if [[ ! -f "$env_file" ]]; then
-    as_root tee "$env_file" >/dev/null <<'EOF'
-# Optional gpustat4cluster runtime environment.
   as_root chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$ETC_DIR"
   as_root chmod 0755 "$ETC_DIR"
   as_root chmod 0644 "$cfg"
-  as_root chmod 0644 "$env_file"
 }
 
 install_systemd() {
