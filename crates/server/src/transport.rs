@@ -3,25 +3,25 @@ use std::{fmt, sync::Arc};
 #[cfg(test)]
 use common::decode_snapshot_payload;
 use common::{
-    payload_len_for_handshake, ErrorCode, FrameDecodeError, FrameHeader, FrameType, HandshakeInfo,
-    HandshakeRequest, QueryRequest, QueryResponse,
+    payload_len_from_archived_len, ErrorCode, FrameDecodeError, FrameHeader, FrameType,
+    HandshakeInfo, HandshakeRequest, QueryRequest, QueryResponse,
 };
 
-use crate::cache::GpuCache;
-use crate::collector::GpuCollector;
+use crate::cache::GresCache;
+use crate::collector::GresCollector;
 
 pub struct TransportContext {
     hostname: String,
-    collector: Arc<dyn GpuCollector>,
-    cache: Arc<GpuCache>,
+    collector: Arc<dyn GresCollector>,
+    cache: Arc<GresCache>,
     ttl_ms: u64,
 }
 
 impl TransportContext {
     pub fn new(
         hostname: impl Into<String>,
-        collector: Arc<dyn GpuCollector>,
-        cache: Arc<GpuCache>,
+        collector: Arc<dyn GresCollector>,
+        cache: Arc<GresCache>,
         ttl_ms: u64,
     ) -> Self {
         Self {
@@ -59,10 +59,13 @@ impl TransportContext {
             .get_latest_or_refresh(self.collector.as_ref(), self.ttl_ms)
         {
             Ok(entry) => {
-                let payload_len = payload_len_for_handshake(&entry.payload)
+                let payload_len = payload_len_from_archived_len(entry.payload.len())
                     .map_err(|_| TransportError::Protocol(ErrorCode::Internal))?;
-                let response =
-                    HandshakeInfo::new(self.hostname.clone(), entry.gpu_num(), payload_len);
+                let response = HandshakeInfo::current(
+                    self.hostname.clone(),
+                    entry.snapshot.gres.len().min(u8::MAX as usize) as u8,
+                    payload_len,
+                );
                 let response_payload = serde_json::to_vec(&response)?;
                 Ok(encode_transport_frame(
                     FrameType::HandshakeInfo,
@@ -71,7 +74,7 @@ impl TransportContext {
                 ))
             }
             Err(code) => {
-                let response = HandshakeInfo::new(self.hostname.clone(), 0, 0);
+                let response = HandshakeInfo::current(self.hostname.clone(), 0, 0);
                 let response_payload = serde_json::to_vec(&response)?;
                 let _ = code;
                 Ok(encode_transport_frame(
@@ -169,12 +172,12 @@ pub fn decode_transport_frame(frame: &[u8]) -> Result<DecodedFrame, TransportErr
 mod tests {
     use super::*;
     use common::{
-        GpuInfo, GpuMemory, GpuProcessInfo, GpuUtilization, ResponseStatus, ServerGpuSnapshot,
+        GresInfo, GresMemory, GresProcessInfo, GresUtilization, ResponseStatus, ServerGresSnapshot,
         PROTOCOL_VERSION,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::collector::MockNvmlCollector;
+    use crate::collector::TestGresCollector;
 
     struct StaticCollector {
         calls: AtomicUsize,
@@ -197,42 +200,44 @@ mod tests {
         }
     }
 
-    impl GpuCollector for StaticCollector {
-        fn collect(&self) -> Result<ServerGpuSnapshot, ErrorCode> {
+    impl GresCollector for StaticCollector {
+        fn collect_gres(&self) -> Result<crate::collector::GresNodeSnapshot, ErrorCode> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if let Some(code) = self.fail {
                 return Err(code);
             }
 
-            Ok(ServerGpuSnapshot {
-                hostname: "node-a".to_string(),
-                driver_version: None,
-                gpus: vec![GpuInfo {
-                    index: 0,
-                    name: "mock-gpu".to_string(),
-                    temperature_c: None,
-                    uuid: Some("GPU-0".to_string()),
-                    memory: GpuMemory {
-                        used_mb: 1024,
-                        total_mb: 81920,
-                    },
-                    utilization: GpuUtilization {
-                        gpu_percent: 75,
-                        memory_percent: 10,
-                    },
-                    processes: vec![GpuProcessInfo {
-                        pid: 42,
-                        uid: 1000,
-                        command: Some("python train.py".to_string()),
-                        used_memory_mb: 512,
+            Ok(crate::collector::GresNodeSnapshot::from_gres_snapshot(
+                ServerGresSnapshot {
+                    hostname: "node-a".to_string(),
+                    driver_version: None,
+                    gres: vec![GresInfo {
+                        index: 0,
+                        name: "mock-gpu".to_string(),
+                        temperature_c: None,
+                        uuid: Some("GPU-0".to_string()),
+                        memory: GresMemory {
+                            used_mb: 1024,
+                            total_mb: 81920,
+                        },
+                        utilization: GresUtilization {
+                            gres_percent: 75,
+                            memory_percent: 10,
+                        },
+                        processes: vec![GresProcessInfo {
+                            pid: 42,
+                            uid: 1000,
+                            command: Some("python train.py".to_string()),
+                            used_memory_mb: 512,
+                        }],
                     }],
-                }],
-            })
+                },
+            ))
         }
     }
 
-    fn context(collector: Arc<dyn GpuCollector>) -> TransportContext {
-        TransportContext::new("node-a", collector, Arc::new(GpuCache::new()), 1_000)
+    fn context(collector: Arc<dyn GresCollector>) -> TransportContext {
+        TransportContext::new("node-a", collector, Arc::new(GresCache::new()), 1_000)
     }
 
     fn request_frame(frame_type: FrameType, request_id: u64, payload: &[u8]) -> Vec<u8> {
@@ -282,13 +287,13 @@ mod tests {
 
         let snapshot = decode_snapshot_payload(&decoded.payload).expect("snapshot payload");
         assert_eq!(snapshot.hostname, "node-a");
-        assert_eq!(snapshot.gpus.len(), 1);
-        assert_eq!(snapshot.gpus[0].utilization.gpu_percent, 75);
+        assert_eq!(snapshot.gres.len(), 1);
+        assert_eq!(snapshot.gres[0].utilization.gres_percent, 75);
     }
 
     #[test]
     fn query_frame_with_mock_collector_returns_data_payload() {
-        let ctx = context(Arc::new(MockNvmlCollector::new("node-a")));
+        let ctx = context(Arc::new(TestGresCollector::new("node-a")));
         let request = request_frame(
             FrameType::QueryRequest,
             21,
@@ -305,10 +310,10 @@ mod tests {
 
         let snapshot = decode_snapshot_payload(&decoded.payload).expect("snapshot payload");
         assert_eq!(snapshot.hostname, "node-a");
-        assert_eq!(snapshot.gpus.len(), 1);
-        assert_eq!(snapshot.gpus[0].utilization.gpu_percent, 87);
-        assert_eq!(snapshot.gpus[0].memory.used_mb, 1234);
-        assert_eq!(snapshot.gpus[0].memory.total_mb, 16384);
+        assert_eq!(snapshot.gres.len(), 1);
+        assert_eq!(snapshot.gres[0].utilization.gres_percent, 87);
+        assert_eq!(snapshot.gres[0].memory.used_mb, 1234);
+        assert_eq!(snapshot.gres[0].memory.total_mb, 16384);
     }
 
     #[test]

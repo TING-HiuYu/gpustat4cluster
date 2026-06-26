@@ -60,11 +60,11 @@ pub struct NodeView {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay_us: Option<u64>,
-    pub gpus: Vec<GpuView>,
+    pub gres: Vec<GresView>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct GpuView {
+pub struct GresView {
     pub index: u8,
     #[serde(default)]
     pub name: String,
@@ -218,31 +218,31 @@ mod tests {
 
     #[test]
     fn backend_response_json_decodes_without_processes() {
-        let raw = r#"{"nodes":[{"hostname":"node-a","gpus":[{"index":0,"util":42,"mem_used_mb":1024,"mem_total_mb":8192}]}]}"#;
+        let raw = r#"{"nodes":[{"hostname":"node-a","gres":[{"index":0,"util":42,"mem_used_mb":1024,"mem_total_mb":8192}]}]}"#;
         let resp = decode_response(raw).expect("decode response");
         assert_eq!(resp.meta.status, "unknown");
         assert_eq!(resp.nodes[0].hostname, "node-a");
         assert!(!resp.nodes[0].stale);
-        assert_eq!(resp.nodes[0].gpus[0].processes, None);
+        assert_eq!(resp.nodes[0].gres[0].processes, None);
     }
 
     #[test]
     fn backend_response_json_decodes_with_processes() {
-        let raw = r#"{"nodes":[{"hostname":"node-a","gpus":[{"index":0,"util":42,"mem_used_mb":1024,"mem_total_mb":8192,"processes":[{"username":"alice","pid":7,"command":"python","used_memory_mb":512}]}]}]}"#;
+        let raw = r#"{"nodes":[{"hostname":"node-a","gres":[{"index":0,"util":42,"mem_used_mb":1024,"mem_total_mb":8192,"processes":[{"username":"alice","pid":7,"command":"python","used_memory_mb":512}]}]}]}"#;
         let resp = decode_response(raw).expect("decode response");
-        let processes = resp.nodes[0].gpus[0].processes.as_ref().unwrap();
+        let processes = resp.nodes[0].gres[0].processes.as_ref().unwrap();
         assert_eq!(processes[0].username, "alice");
         assert_eq!(processes[0].used_memory_mb, 512);
     }
 
     #[test]
     fn backend_response_json_decodes_with_meta_and_stale() {
-        let raw = r#"{"meta":{"status":"empty","timestamp_ms":123,"node_count":0,"errors":[]},"nodes":[{"hostname":"node-a","stale":true,"error":"kcp timeout","gpus":[]}]}"#;
+        let raw = r#"{"meta":{"status":"empty","timestamp_ms":123,"node_count":0,"errors":[]},"nodes":[{"hostname":"node-a","stale":true,"error":"transport timeout","gres":[]}]}"#;
         let resp = decode_response(raw).expect("decode response");
         assert_eq!(resp.meta.status, "empty");
         assert_eq!(resp.meta.timestamp_ms, 123);
         assert!(resp.nodes[0].stale);
-        assert_eq!(resp.nodes[0].error.as_deref(), Some("kcp timeout"));
+        assert_eq!(resp.nodes[0].error.as_deref(), Some("transport timeout"));
     }
 
     #[test]

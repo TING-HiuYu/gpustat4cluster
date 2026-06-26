@@ -281,6 +281,10 @@ fn parse_legacy_announce(msg: &str) -> Option<DiscoveryAnnounce> {
             .get("tcp_port")
             .and_then(Value::as_u64)
             .and_then(|v| v.try_into().ok()),
+        udp_port: raw
+            .get("udp_port")
+            .and_then(Value::as_u64)
+            .and_then(|v| v.try_into().ok()),
         ttl: raw
             .get("ttl")
             .and_then(Value::as_u64)

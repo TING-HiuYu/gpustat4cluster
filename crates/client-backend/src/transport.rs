@@ -8,7 +8,7 @@ use common::{
         FrameType,
     },
     ErrorCode, HandshakeInfo, HandshakeRequest, QueryRequest as WireQueryRequest,
-    QueryResponse as WireQueryResponse, ResponseStatus, ServerGpuSnapshot, PROTOCOL_VERSION,
+    QueryResponse as WireQueryResponse, ResponseStatus, ServerGresSnapshot, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +61,7 @@ pub fn parse_disconnect_reason_frame(frame: &[u8]) -> Result<String, TransportEr
     Ok(String::from_utf8_lossy(payload).trim().to_string())
 }
 
-pub fn parse_data_payload_frame(frame: &[u8]) -> Result<ServerGpuSnapshot, TransportError> {
+pub fn parse_data_payload_frame(frame: &[u8]) -> Result<ServerGresSnapshot, TransportError> {
     let (_, payload) = split_frame(frame, FrameType::DataPayload)?;
     // Frame headers are 18 bytes, so payload slices may be unaligned for rkyv.
     // Decode through the common helper to keep runtime and transport tests consistent.
@@ -144,27 +144,27 @@ fn split_frame(frame: &[u8], expected: FrameType) -> Result<(FrameHeader, &[u8])
 mod tests {
     use super::*;
     use common::{
-        protocol::encode_snapshot_payload, GpuInfo, GpuMemory, GpuProcessInfo, GpuUtilization,
+        protocol::encode_snapshot_payload, GresInfo, GresMemory, GresProcessInfo, GresUtilization,
     };
 
-    fn snapshot() -> ServerGpuSnapshot {
-        ServerGpuSnapshot {
+    fn snapshot() -> ServerGresSnapshot {
+        ServerGresSnapshot {
             hostname: "node-a".to_string(),
             driver_version: None,
-            gpus: vec![GpuInfo {
+            gres: vec![GresInfo {
                 index: 0,
                 name: "NVIDIA A100".to_string(),
                 temperature_c: None,
                 uuid: None,
-                memory: GpuMemory {
+                memory: GresMemory {
                     used_mb: 1024,
                     total_mb: 81920,
                 },
-                utilization: GpuUtilization {
-                    gpu_percent: 88,
+                utilization: GresUtilization {
+                    gres_percent: 88,
                     memory_percent: 10,
                 },
-                processes: vec![GpuProcessInfo {
+                processes: vec![GresProcessInfo {
                     pid: 42,
                     uid: 1000,
                     command: Some("python".to_string()),
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn parses_handshake_info_frame() {
-        let info = HandshakeInfo::new("node-a", 2, 4096);
+        let info = HandshakeInfo::current("node-a", 2, 4096);
         let frame = encode_json_frame(FrameType::HandshakeInfo, 9, &info).expect("frame");
         let parsed = parse_handshake_info_frame(&frame).expect("parse handshake");
         assert_eq!(parsed.hostname, "node-a");
@@ -209,7 +209,7 @@ mod tests {
         let frame = build_data_payload_frame(12, &payload).expect("frame");
         let parsed = parse_data_payload_frame(&frame).expect("snapshot");
         assert_eq!(parsed.hostname, "node-a");
-        assert_eq!(parsed.gpus[0].utilization.gpu_percent, 88);
+        assert_eq!(parsed.gres[0].utilization.gres_percent, 88);
     }
 
     #[test]

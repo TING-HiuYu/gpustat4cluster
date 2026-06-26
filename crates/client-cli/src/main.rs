@@ -90,7 +90,7 @@ fn write_stdout(output: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{GpuView, NodeView, QueryResponse};
+    use crate::backend::{GresView, NodeView, QueryResponse};
     use std::cell::Cell;
 
     #[test]
@@ -119,7 +119,7 @@ mod tests {
                         stale: false,
                         error: None,
                         delay_us: None,
-                        gpus: vec![GpuView {
+                        gres: vec![GresView {
                             index: 0,
                             name: "NVIDIA A100".to_string(),
                             temperature_c: Some(32),
@@ -163,7 +163,7 @@ mod tests {
                         stale: false,
                         error: None,
                         delay_us: None,
-                        gpus: vec![GpuView {
+                        gres: vec![GresView {
                             index: 0,
                             name: "NVIDIA A100".to_string(),
                             temperature_c: Some(32),

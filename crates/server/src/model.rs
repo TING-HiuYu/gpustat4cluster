@@ -1,25 +1,29 @@
-use common::ServerGpuSnapshot;
+use common::ServerGresSnapshot;
 
 pub trait SnapshotSummary {
+    fn gres_num(&self) -> u8;
     fn gpu_num(&self) -> u8;
     fn avg_utilization(&self) -> u8;
 }
 
-impl SnapshotSummary for ServerGpuSnapshot {
+impl SnapshotSummary for ServerGresSnapshot {
+    fn gres_num(&self) -> u8 {
+        self.gres.len().min(u8::MAX as usize) as u8
+    }
+
     fn gpu_num(&self) -> u8 {
-        self.gpus.len().min(u8::MAX as usize) as u8
+        self.gres_num()
     }
 
     fn avg_utilization(&self) -> u8 {
-        if self.gpus.is_empty() {
+        if self.gres.is_empty() {
             return 0;
         }
-
-        let total: u16 = self
-            .gpus
+        let total: u64 = self
+            .gres
             .iter()
-            .map(|gpu| gpu.utilization.gpu_percent as u16)
+            .map(|gres| gres.utilization.gres_percent as u64)
             .sum();
-        (total / self.gpus.len() as u16).min(100) as u8
+        (total / self.gres.len() as u64).min(100) as u8
     }
 }
