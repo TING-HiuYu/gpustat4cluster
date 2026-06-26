@@ -99,7 +99,7 @@ impl LocalApiState {
                     connection_id: format!("conn-{:03}", index_base + idx + 1),
                     hostname: node.hostname.clone(),
                     num: 0,
-                    server_gpus: Vec::new(),
+                    server_gres: Vec::new(),
                     record_timestamp: node.ts_ms,
                     addr: node.addr,
                     last_snapshot: None,
@@ -633,7 +633,7 @@ fn refresh_stale_cache_for_query_tcp(state: &LocalApiState) -> Result<(), String
             Ok(snapshot) => {
                 let latency_us = query_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
                 let hostname = snapshot.hostname.clone();
-                let gpu_num = snapshot.gpus.len();
+                let gpu_num = snapshot.gres.len();
                 if !target.had_snapshot {
                     logger::transport_info(
                         "tcp",
@@ -740,7 +740,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::cache::{upsert_snapshot, CacheMap};
-    use common::{GpuInfo, GpuMemory, GpuProcessInfo, GpuUtilization, ServerGpuSnapshot};
+    use common::{GresInfo, GresMemory, GresProcessInfo, GresUtilization, ServerGresSnapshot};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -750,23 +750,23 @@ mod tests {
             &mut rows,
             "conn-001",
             "127.0.0.1:30000".parse().unwrap(),
-            ServerGpuSnapshot {
+            ServerGresSnapshot {
                 hostname: "kcp-node".to_string(),
                 driver_version: None,
-                gpus: vec![GpuInfo {
+                gres: vec![GresInfo {
                     index: 0,
                     name: "NVIDIA A100".to_string(),
                     temperature_c: None,
                     uuid: None,
-                    memory: GpuMemory {
+                    memory: GresMemory {
                         used_mb: 1024,
                         total_mb: 81920,
                     },
-                    utilization: GpuUtilization {
-                        gpu_percent: 66,
+                    utilization: GresUtilization {
+                        gres_percent: 66,
                         memory_percent: 10,
                     },
-                    processes: vec![GpuProcessInfo {
+                    processes: vec![GresProcessInfo {
                         pid: 7,
                         uid: 1000,
                         command: Some("python".to_string()),

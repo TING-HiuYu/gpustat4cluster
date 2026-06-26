@@ -1,14 +1,11 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-#[cfg(test)]
-use common::decode_snapshot_payload;
-use common::{encode_snapshot_payload, ErrorCode, ServerGpuSnapshot};
+use common::{encode_snapshot_payload, ErrorCode, ServerGresSnapshot};
 
-use crate::collector::GpuCollector;
-use crate::model::SnapshotSummary;
+use crate::collector::GresCollector;
 
 const LATENCY_SAMPLE_LIMIT: usize = 128;
 
@@ -16,21 +13,13 @@ const LATENCY_SAMPLE_LIMIT: usize = 128;
 pub struct CacheEntry {
     pub timestamp_ms: i64,
     pub payload: Arc<Vec<u8>>,
-    pub snapshot: Arc<ServerGpuSnapshot>,
+    pub snapshot: Arc<ServerGresSnapshot>,
     collected_at: Instant,
 }
 
 impl CacheEntry {
     fn is_expired(&self, ttl_ms: u64, now: Instant) -> bool {
         now.duration_since(self.collected_at).as_millis() as u64 >= ttl_ms
-    }
-
-    pub fn gpu_num(&self) -> u8 {
-        self.snapshot.gpu_num()
-    }
-
-    pub fn avg_utilization(&self) -> u8 {
-        self.snapshot.avg_utilization()
     }
 }
 
@@ -126,14 +115,14 @@ struct RefreshState {
 }
 
 #[derive(Debug)]
-pub struct GpuCache {
+pub struct GresCache {
     entry: RwLock<Option<CacheEntry>>,
     refresh_state: Mutex<RefreshState>,
     refreshed: Condvar,
     metrics: CacheMetrics,
 }
 
-impl GpuCache {
+impl GresCache {
     pub fn new() -> Self {
         Self {
             entry: RwLock::new(None),
@@ -145,7 +134,7 @@ impl GpuCache {
 
     pub fn get_or_refresh(
         self: &Arc<Self>,
-        collector: &dyn GpuCollector,
+        collector: &dyn GresCollector,
         ttl_ms: u64,
     ) -> Result<CacheEntry, ErrorCode> {
         if let Some(hit) = self.get_fresh(ttl_ms, Instant::now()) {
@@ -184,11 +173,11 @@ impl GpuCache {
 
         drop(state);
         let started = Instant::now();
-        let result = collector.collect().and_then(|snapshot| {
-            let timestamp_ms = now_unix_ms();
+        let result = collector.collect_gres_snapshot().and_then(|snapshot| {
+            let snapshot = omit_process_commands(snapshot);
             let payload = encode_snapshot_payload(&snapshot).map_err(|_| ErrorCode::Internal)?;
             Ok(CacheEntry {
-                timestamp_ms,
+                timestamp_ms: now_ms(),
                 payload: Arc::new(payload),
                 snapshot: Arc::new(snapshot),
                 collected_at: Instant::now(),
@@ -211,7 +200,7 @@ impl GpuCache {
 
     pub fn get_latest_or_refresh(
         self: &Arc<Self>,
-        collector: &dyn GpuCollector,
+        collector: &dyn GresCollector,
         ttl_ms: u64,
     ) -> Result<CacheEntry, ErrorCode> {
         if let Some(entry) = self.latest() {
@@ -253,6 +242,15 @@ impl GpuCache {
     }
 }
 
+fn omit_process_commands(mut snapshot: ServerGresSnapshot) -> ServerGresSnapshot {
+    for gres in &mut snapshot.gres {
+        for process in &mut gres.processes {
+            process.command = None;
+        }
+    }
+    snapshot
+}
+
 fn ratio_bps(numerator: u64, denominator: u64) -> u64 {
     if denominator == 0 {
         0
@@ -273,17 +271,10 @@ fn percentile_us(mut samples: Vec<u64>, percentile: u64) -> u64 {
     samples[rank as usize]
 }
 
-fn now_unix_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{GpuInfo, GpuMemory, GpuProcessInfo, GpuUtilization};
+    use common::{GresInfo, GresMemory, GresProcessInfo, GresUtilization};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
     use std::thread;
@@ -332,8 +323,8 @@ mod tests {
         }
     }
 
-    impl GpuCollector for CountingCollector {
-        fn collect(&self) -> Result<ServerGpuSnapshot, ErrorCode> {
+    impl GresCollector for CountingCollector {
+        fn collect_gres(&self) -> Result<crate::collector::GresNodeSnapshot, ErrorCode> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             if self.sleep_ms > 0 {
                 thread::sleep(Duration::from_millis(self.sleep_ms));
@@ -341,44 +332,49 @@ mod tests {
             if self.fail {
                 return Err(ErrorCode::NvmlUnavailable);
             }
-            Ok(ServerGpuSnapshot {
-                hostname: "test-host".to_string(),
-                driver_version: None,
-                gpus: vec![GpuInfo {
-                    index: 0,
-                    name: "mock-gpu".to_string(),
-                    temperature_c: None,
-                    uuid: Some(format!("GPU-{call}")),
-                    memory: GpuMemory {
-                        used_mb: call as u64,
-                        total_mb: 80,
-                    },
-                    utilization: GpuUtilization {
-                        gpu_percent: (call as u8).min(100),
-                        memory_percent: 5,
-                    },
-                    processes: vec![GpuProcessInfo {
-                        pid: 1234,
-                        uid: 1000,
-                        command: Some("python train.py".to_string()),
-                        used_memory_mb: call as u64,
+            Ok(crate::collector::GresNodeSnapshot::from_gres_snapshot(
+                ServerGresSnapshot {
+                    hostname: "test-host".to_string(),
+                    driver_version: None,
+                    gres: vec![GresInfo {
+                        index: 0,
+                        name: "test-gres".to_string(),
+                        temperature_c: None,
+                        uuid: Some(format!("GRES-{call}")),
+                        memory: GresMemory {
+                            used_mb: call as u64,
+                            total_mb: 80,
+                        },
+                        utilization: GresUtilization {
+                            gres_percent: (call as u8).min(100),
+                            memory_percent: 5,
+                        },
+                        processes: vec![GresProcessInfo {
+                            pid: 1234,
+                            uid: 1000,
+                            command: Some("python train.py".to_string()),
+                            used_memory_mb: call as u64,
+                        }],
                     }],
-                }],
-            })
+                },
+            ))
         }
     }
 
     #[test]
     fn ttl_cache_hit_reuses_entry() {
-        let cache = Arc::new(GpuCache::new());
+        let cache = Arc::new(GresCache::new());
         let collector = CountingCollector::new();
 
         let first = cache.get_or_refresh(&collector, 1_000).unwrap();
         let second = cache.get_or_refresh(&collector, 1_000).unwrap();
 
         assert_eq!(collector.calls(), 1);
-        assert_eq!(first.timestamp_ms, second.timestamp_ms);
-        assert_eq!(first.avg_utilization(), second.avg_utilization());
+        assert!(Arc::ptr_eq(&first.snapshot, &second.snapshot));
+        assert_eq!(
+            first.snapshot.gres[0].utilization.gres_percent,
+            second.snapshot.gres[0].utilization.gres_percent
+        );
         let metrics = cache.metrics();
         assert_eq!(metrics.cache_hits, 1);
         assert_eq!(metrics.cache_misses, 1);
@@ -388,7 +384,7 @@ mod tests {
 
     #[test]
     fn ttl_expiry_refreshes_entry() {
-        let cache = Arc::new(GpuCache::new());
+        let cache = Arc::new(GresCache::new());
         let collector = CountingCollector::new();
 
         let first = cache.get_or_refresh(&collector, 1).unwrap();
@@ -396,13 +392,16 @@ mod tests {
         let second = cache.get_or_refresh(&collector, 1).unwrap();
 
         assert_eq!(collector.calls(), 2);
-        assert_ne!(first.avg_utilization(), second.avg_utilization());
+        assert_ne!(
+            first.snapshot.gres[0].utilization.gres_percent,
+            second.snapshot.gres[0].utilization.gres_percent
+        );
         assert_eq!(cache.metrics().cache_misses, 2);
     }
 
     #[test]
     fn concurrent_stale_requests_are_coalesced() {
-        let cache = Arc::new(GpuCache::new());
+        let cache = Arc::new(GresCache::new());
         let collector = Arc::new(CountingCollector::slow(25));
         let barrier = Arc::new(Barrier::new(64));
 
@@ -425,10 +424,7 @@ mod tests {
         assert_eq!(collector.calls(), 1);
         assert!(entries
             .iter()
-            .all(|entry| entry.timestamp_ms == entries[0].timestamp_ms));
-        assert!(entries
-            .iter()
-            .all(|entry| entry.payload.as_slice() == entries[0].payload.as_slice()));
+            .all(|entry| Arc::ptr_eq(&entry.snapshot, &entries[0].snapshot)));
         let metrics = cache.metrics();
         assert_eq!(metrics.cache_misses, 64);
         assert_eq!(metrics.collect_count, 1);
@@ -441,7 +437,7 @@ mod tests {
 
     #[test]
     fn concurrent_stale_failures_are_coalesced_without_deadlock() {
-        let cache = Arc::new(GpuCache::new());
+        let cache = Arc::new(GresCache::new());
         let collector = Arc::new(CountingCollector::failing_slow(25));
         let barrier = Arc::new(Barrier::new(32));
 
@@ -473,7 +469,7 @@ mod tests {
 
     #[test]
     fn collector_failure_returns_degraded_error() {
-        let cache = Arc::new(GpuCache::new());
+        let cache = Arc::new(GresCache::new());
         let collector = CountingCollector::failing();
 
         let err = cache.get_or_refresh(&collector, 10).unwrap_err();
@@ -485,7 +481,7 @@ mod tests {
 
     #[test]
     fn cache_metrics_continue_after_error_then_success() {
-        let cache = Arc::new(GpuCache::new());
+        let cache = Arc::new(GresCache::new());
         let failing = CountingCollector::failing();
         let success = CountingCollector::new();
 
@@ -493,7 +489,7 @@ mod tests {
         let entry = cache.get_or_refresh(&success, 1_000).unwrap();
 
         assert_eq!(err, ErrorCode::NvmlUnavailable);
-        assert_eq!(entry.gpu_num(), 1);
+        assert_eq!(entry.snapshot.gres.len(), 1);
         assert_eq!(failing.calls(), 1);
         assert_eq!(success.calls(), 1);
 
@@ -512,13 +508,20 @@ mod tests {
     }
 
     #[test]
-    fn payload_decodes_to_same_snapshot() {
-        let cache = Arc::new(GpuCache::new());
+    fn cached_snapshot_omits_process_commands() {
+        let cache = Arc::new(GresCache::new());
         let collector = CountingCollector::new();
 
         let entry = cache.get_or_refresh(&collector, 1_000).unwrap();
-        let decoded = decode_snapshot_payload(&entry.payload).unwrap();
 
-        assert_eq!(decoded, *entry.snapshot);
+        assert_eq!(entry.snapshot.hostname, "test-host");
+        assert_eq!(entry.snapshot.gres[0].processes[0].command, None);
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }

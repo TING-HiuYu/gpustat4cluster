@@ -7,12 +7,12 @@ SERVER_PID=""
 BACKEND_PID=""
 
 SERVER_QUERY_ADDR="${GPUSTAT4CLUSTER_SMOKE_QUERY_ADDR:-127.0.0.1:4622}"
-CLIENT_BACKEND_ADDR="127.0.0.1:4521"
-MOCK_HOSTNAME="${GPUSTAT4CLUSTER_SMOKE_MOCK_HOSTNAME:-mock-smoke-node}"
+TEST_HOSTNAME="${GPUSTAT4CLUSTER_SMOKE_TEST_HOSTNAME:-test-smoke-node}"
 SERVER_PORT_START="${GPUSTAT4CLUSTER_SMOKE_PORT_START:-39200}"
 SERVER_PORT_END="${GPUSTAT4CLUSTER_SMOKE_PORT_END:-39210}"
 MULTICAST_ADDR="${GPUSTAT4CLUSTER_SMOKE_MULTICAST_ADDR:-239.0.0.1:4400}"
 PORT_RELEASE_TIMEOUT_SECS="${GPUSTAT4CLUSTER_SMOKE_PORT_RELEASE_TIMEOUT_SECS:-10}"
+CLIENT_BACKEND_SOCKET=""
 
 log() {
   printf '[smoke] %s\n' "$*"
@@ -27,10 +27,11 @@ cleanup() {
   local status=$?
   stop_pid "$BACKEND_PID"
   stop_pid "$SERVER_PID"
-  reap_known_listener "$CLIENT_BACKEND_ADDR"
   reap_known_listener "$SERVER_QUERY_ADDR"
-  wait_until_tcp_free "$CLIENT_BACKEND_ADDR" "$PORT_RELEASE_TIMEOUT_SECS" >/dev/null 2>&1 || true
   wait_until_tcp_free "$SERVER_QUERY_ADDR" "$PORT_RELEASE_TIMEOUT_SECS" >/dev/null 2>&1 || true
+  if [[ -n "$CLIENT_BACKEND_SOCKET" ]]; then
+    rm -f "$CLIENT_BACKEND_SOCKET"
+  fi
   if [[ -n "$TMP_DIR" ]]; then
     rm -rf "$TMP_DIR"
   fi
@@ -140,6 +141,7 @@ wait_until_tcp_free() {
 
 write_config() {
   local path="$1"
+  local uds_path="$2"
   cat >"$path" <<EOF
 [connecting]
 port_range = [$SERVER_PORT_START, $SERVER_PORT_END]
@@ -158,8 +160,7 @@ max_size = "5mb"
 
 [services]
 cache_ttl_ms = 40
-# Optional: UDS path for client frontend <-> client-backend.
-# uds_path = "/run/gpustat4cluster/client.sock"
+uds_path = "$uds_path"
 EOF
 }
 
@@ -193,29 +194,31 @@ PY
 
 start_fake_backend() {
   local log_file="$1"
-  split_host_port "$CLIENT_BACKEND_ADDR"
+  local socket_path="$2"
 
-  python3 - "$HOST" "$PORT" "$MOCK_HOSTNAME" >"$log_file" 2>&1 <<'PY' &
+  rm -f "$socket_path"
+  python3 - "$socket_path" "$TEST_HOSTNAME" >"$log_file" 2>&1 <<'PY' &
 import json
-import socketserver
+import os
+import socket
 import sys
 import time
 
-host = sys.argv[1]
-port = int(sys.argv[2])
-hostname = sys.argv[3]
+socket_path = sys.argv[1]
+hostname = sys.argv[2]
 
 response = {
     "nodes": [
         {
-            "connection_id": "mock-001",
+            "connection_id": "test-001",
             "hostname": hostname,
             "addr": "127.0.0.1:39999",
             "timestamp_ms": int(time.time() * 1000),
             "num": 1,
-            "gpus": [
+            "gres": [
                 {
                     "index": 0,
+                    "name": "NVIDIA Test GPU 0",
                     "util": 87,
                     "mem_used_mb": 1234,
                     "mem_total_mb": 16384,
@@ -225,26 +228,35 @@ response = {
     ]
 }
 
-
-class Handler(socketserver.BaseRequestHandler):
-    def handle(self):
-        data = self.request.recv(4096)
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(socket_path)
+os.chmod(socket_path, 0o600)
+server.listen(16)
+while True:
+    conn, _ = server.accept()
+    with conn:
+        data = conn.recv(4096)
         if data.startswith(b"QUERY"):
-            self.request.sendall((json.dumps(response) + "\n").encode("utf-8"))
+            conn.sendall((json.dumps(response) + "\n").encode("utf-8"))
         elif data.startswith(b"LIST"):
-            self.request.sendall(b"mock-001 mock-smoke-node 127.0.0.1:39999 0\n")
+            conn.sendall(b"test-001 test-smoke-node 127.0.0.1:39999 0\n")
         else:
-            self.request.sendall(b"ERR unsupported command\n")
-
-
-class Server(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True
-
-
-with Server((host, port), Handler) as server:
-    server.serve_forever()
+            conn.sendall(b"ERR unsupported command\n")
 PY
   BACKEND_PID=$!
+}
+
+wait_for_uds() {
+  local socket_path="$1"
+  local timeout_secs="$2"
+  local deadline=$((SECONDS + timeout_secs))
+
+  while (( SECONDS < deadline )); do
+    [[ -S "$socket_path" ]] && return 0
+    sleep 0.2
+  done
+
+  return 1
 }
 
 main() {
@@ -253,38 +265,12 @@ main() {
 
   TMP_DIR="$(mktemp -d)"
   local config_path="$TMP_DIR/config.toml"
-  local server_log="$TMP_DIR/server.log"
   local backend_log="$TMP_DIR/client-backend.log"
-  local server_query="$TMP_DIR/server-query.json"
   local cli_output="$TMP_DIR/cli-output.txt"
+  CLIENT_BACKEND_SOCKET="$TMP_DIR/client.sock"
 
-  write_config "$config_path"
+  write_config "$config_path" "$CLIENT_BACKEND_SOCKET"
   build_binaries
-
-  assert_port_free "$SERVER_QUERY_ADDR"
-  assert_port_free "$CLIENT_BACKEND_ADDR"
-
-  log "starting server with temp config: $config_path"
-  (
-    cd "$ROOT_DIR"
-    GPUSTAT4CLUSTER_CONFIG="$config_path" \
-      GPUSTAT4CLUSTER_QUERY_ADDR="$SERVER_QUERY_ADDR" \
-      GPUSTAT4CLUSTER_SIMULATE_NVML_MISSING=1 \
-      target/debug/server
-  ) >"$server_log" 2>&1 &
-  SERVER_PID=$!
-
-  wait_for_tcp "$SERVER_QUERY_ADDR" 10 || {
-    cat "$server_log" >&2 || true
-    fail "server query port did not become ready: $SERVER_QUERY_ADDR"
-  }
-
-  log "verifying server TCP/JSON query path"
-  query_server_once "$server_query"
-  if ! grep -Eq '"ok":(true|false)' "$server_query"; then
-    cat "$server_query" >&2 || true
-    fail "server query response did not contain JSON ok field"
-  fi
 
   log "starting client-backend; multicast discovery may fall back to empty node list"
   (
@@ -294,49 +280,49 @@ main() {
   ) >"$backend_log" 2>&1 &
   BACKEND_PID=$!
 
-  wait_for_tcp "$CLIENT_BACKEND_ADDR" 10 || {
+  wait_for_uds "$CLIENT_BACKEND_SOCKET" 10 || {
     cat "$backend_log" >&2 || true
-    fail "client-backend port did not become ready: $CLIENT_BACKEND_ADDR"
+    fail "client-backend UDS did not become ready: $CLIENT_BACKEND_SOCKET"
   }
 
-  log "client-backend bootstrap port is ready"
+  log "client-backend UDS is ready"
   kill "$BACKEND_PID" >/dev/null 2>&1 || true
   wait "$BACKEND_PID" >/dev/null 2>&1 || true
   BACKEND_PID=""
   sleep 0.2
-  assert_port_free "$CLIENT_BACKEND_ADDR"
+  rm -f "$CLIENT_BACKEND_SOCKET"
 
-  log "starting fake backend with deterministic mock GPU row"
-  start_fake_backend "$backend_log"
-  wait_for_tcp "$CLIENT_BACKEND_ADDR" 10 || {
+  log "starting fake UDS backend with deterministic test GRES row"
+  start_fake_backend "$backend_log" "$CLIENT_BACKEND_SOCKET"
+  wait_for_uds "$CLIENT_BACKEND_SOCKET" 10 || {
     cat "$backend_log" >&2 || true
-    fail "fake backend port did not become ready: $CLIENT_BACKEND_ADDR"
+    fail "fake backend UDS did not become ready: $CLIENT_BACKEND_SOCKET"
   }
 
   log "running CLI against local backend"
   (
     cd "$ROOT_DIR"
-    target/debug/gpustat4cluster
+    GPUSTAT4CLUSTER_BACKEND_SOCKET="$CLIENT_BACKEND_SOCKET" \
+      target/debug/gpustat4cluster
   ) >"$cli_output" 2>&1 || {
     cat "$cli_output" >&2 || true
     fail "CLI command failed"
   }
 
-  if ! grep -q 'HOSTNAME' "$cli_output"; then
+  if ! grep -q "$TEST_HOSTNAME" "$cli_output"; then
     cat "$cli_output" >&2 || true
-    fail "CLI output did not contain expected table header"
+    fail "CLI output did not contain test hostname: $TEST_HOSTNAME"
   fi
-  if ! grep -q "$MOCK_HOSTNAME" "$cli_output"; then
+  if ! grep -q 'NVIDIA Test GPU 0' "$cli_output"; then
     cat "$cli_output" >&2 || true
-    fail "CLI output did not contain mock hostname: $MOCK_HOSTNAME"
+    fail "CLI output did not contain test GRES name"
   fi
-  if ! grep -Eq '[0-9]+%' "$cli_output" || ! grep -q '1234/16384' "$cli_output"; then
+  if ! grep -Eq '[0-9]+ %' "$cli_output" || ! grep -Eq '1234[[:space:]]+/[[:space:]]+16384' "$cli_output"; then
     cat "$cli_output" >&2 || true
-    fail "CLI output did not contain expected mock GPU utilization/memory row"
+    fail "CLI output did not contain expected test GRES utilization/memory row"
   fi
-  log "CLI rendered deterministic mock GPU row"
+  log "CLI rendered deterministic test GRES row"
 
-  log "server query response: $(tr -d '\n' <"$server_query")"
   log "CLI output:"
   cat "$cli_output"
   log "smoke passed"

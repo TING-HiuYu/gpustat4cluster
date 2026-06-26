@@ -1,65 +1,160 @@
-use common::{ErrorCode, ServerGpuSnapshot};
-#[cfg(any(test, feature = "mock-nvml"))]
-use common::{GpuInfo, GpuMemory, GpuProcessInfo, GpuUtilization};
-
-pub const COLLECTOR_ENV: &str = "GPUSTAT4CLUSTER_COLLECTOR";
-pub const FORCE_MOCK_ENV: &str = "GPUSTAT4CLUSTER_FORCE_MOCK";
-#[cfg(any(test, feature = "mock-nvml"))]
-pub const MOCK_HOSTNAME_ENV: &str = "GPUSTAT4CLUSTER_MOCK_HOSTNAME";
-#[cfg(any(test, feature = "mock-nvml"))]
-pub const MOCK_GPU_COUNT_ENV: &str = "GPUSTAT4CLUSTER_MOCK_GPU_COUNT";
+use common::{
+    ErrorCode, GresInfo, GresMemory, GresProcessInfo, GresUtilization, ServerGresSnapshot,
+};
 
 #[cfg(test)]
 pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub trait GpuCollector: Send + Sync {
-    fn collect(&self) -> Result<ServerGpuSnapshot, ErrorCode>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum GresResourceKind {
+    Nvml,
 }
 
-#[cfg(any(test, feature = "mock-nvml"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GresNodeSnapshot {
+    pub hostname: String,
+    pub driver_version: Option<String>,
+    pub resources: Vec<GresResource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GresResource {
+    pub kind: GresResourceKind,
+    pub index: u8,
+    pub name: String,
+    pub uuid: Option<String>,
+    pub temperature_c: Option<u32>,
+    pub memory_used_mb: u64,
+    pub memory_total_mb: u64,
+    pub utilization_gres_percent: u8,
+    pub utilization_memory_percent: u8,
+    pub processes: Vec<GresProcess>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GresProcess {
+    pub pid: u32,
+    pub uid: u32,
+    pub used_memory_mb: u64,
+}
+
+impl GresNodeSnapshot {
+    #[allow(dead_code)]
+    pub fn from_gres_snapshot(snapshot: ServerGresSnapshot) -> Self {
+        Self {
+            hostname: snapshot.hostname,
+            driver_version: snapshot.driver_version,
+            resources: snapshot
+                .gres
+                .into_iter()
+                .map(|gres| GresResource {
+                    kind: GresResourceKind::Nvml,
+                    index: gres.index,
+                    name: gres.name,
+                    uuid: gres.uuid,
+                    temperature_c: gres.temperature_c,
+                    memory_used_mb: gres.memory.used_mb,
+                    memory_total_mb: gres.memory.total_mb,
+                    utilization_gres_percent: gres.utilization.gres_percent,
+                    utilization_memory_percent: gres.utilization.memory_percent,
+                    processes: gres
+                        .processes
+                        .into_iter()
+                        .map(|process| GresProcess {
+                            pid: process.pid,
+                            uid: process.uid,
+                            used_memory_mb: process.used_memory_mb,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn into_gres_snapshot(self) -> ServerGresSnapshot {
+        ServerGresSnapshot {
+            hostname: self.hostname,
+            driver_version: self.driver_version,
+            gres: self
+                .resources
+                .into_iter()
+                .map(|resource| GresInfo {
+                    index: resource.index,
+                    name: resource.name,
+                    temperature_c: resource.temperature_c,
+                    uuid: resource.uuid,
+                    memory: GresMemory {
+                        used_mb: resource.memory_used_mb,
+                        total_mb: resource.memory_total_mb,
+                    },
+                    utilization: GresUtilization {
+                        gres_percent: resource.utilization_gres_percent,
+                        memory_percent: resource.utilization_memory_percent,
+                    },
+                    processes: resource
+                        .processes
+                        .into_iter()
+                        .map(|process| GresProcessInfo {
+                            pid: process.pid,
+                            uid: process.uid,
+                            command: None,
+                            used_memory_mb: process.used_memory_mb,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+pub trait GresCollector: Send + Sync {
+    fn collect_gres(&self) -> Result<GresNodeSnapshot, ErrorCode>;
+
+    fn collect_gres_snapshot(&self) -> Result<ServerGresSnapshot, ErrorCode> {
+        self.collect_gres()
+            .map(GresNodeSnapshot::into_gres_snapshot)
+    }
+}
+
+#[cfg(test)]
 #[derive(Debug)]
-pub struct MockNvmlCollector {
+pub struct TestGresCollector {
     hostname: String,
-    gpu_count: u8,
+    gres_count: u8,
 }
 
-#[cfg(any(test, feature = "mock-nvml"))]
-impl MockNvmlCollector {
+#[cfg(test)]
+impl TestGresCollector {
     pub fn new(hostname: impl Into<String>) -> Self {
         Self {
             hostname: hostname.into(),
-            gpu_count: 1,
+            gres_count: 1,
         }
     }
 
-    pub fn from_env(default_hostname: impl Into<String>) -> Self {
-        let hostname = std::env::var(MOCK_HOSTNAME_ENV).unwrap_or_else(|_| default_hostname.into());
-        Self {
-            hostname,
-            gpu_count: mock_gpu_count_from_env(),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn with_gpu_count(hostname: impl Into<String>, gpu_count: u8) -> Self {
+    pub fn with_gres_count(hostname: impl Into<String>, gres_count: u8) -> Self {
         Self {
             hostname: hostname.into(),
-            gpu_count: gpu_count.max(1),
+            gres_count: gres_count.max(1),
         }
     }
 }
 
-#[cfg(any(test, feature = "mock-nvml"))]
-impl Default for MockNvmlCollector {
+#[cfg(test)]
+impl Default for TestGresCollector {
     fn default() -> Self {
-        Self::new("mock-host")
+        Self::new("test-host")
     }
 }
 
-#[cfg(any(test, feature = "mock-nvml"))]
-impl GpuCollector for MockNvmlCollector {
-    fn collect(&self) -> Result<ServerGpuSnapshot, ErrorCode> {
-        Ok(mock_snapshot(self.hostname.clone(), self.gpu_count))
+#[cfg(test)]
+impl GresCollector for TestGresCollector {
+    fn collect_gres(&self) -> Result<GresNodeSnapshot, ErrorCode> {
+        Ok(GresNodeSnapshot::from_gres_snapshot(test_snapshot(
+            self.hostname.clone(),
+            self.gres_count,
+        )))
     }
 }
 
@@ -77,10 +172,125 @@ impl DegradedCollector {
 }
 
 #[cfg(test)]
-impl GpuCollector for DegradedCollector {
-    fn collect(&self) -> Result<ServerGpuSnapshot, ErrorCode> {
+impl GresCollector for DegradedCollector {
+    fn collect_gres(&self) -> Result<GresNodeSnapshot, ErrorCode> {
         Err(self.code)
     }
+}
+
+#[cfg(test)]
+pub fn assert_gres_collector_contract(collector: &dyn GresCollector) {
+    let snapshot = collector
+        .collect_gres()
+        .expect("GRES collector should return a normalized snapshot");
+    validate_gres_node_snapshot_contract(&snapshot)
+        .expect("GRES collector returned a non-normalized snapshot");
+
+    let protocol_snapshot = snapshot.into_gres_snapshot();
+    let metadata = common::HostMetadata::from_snapshot(&protocol_snapshot);
+    let runtime = common::RuntimeSnapshot::from_snapshot(&protocol_snapshot);
+    let rebuilt = runtime.to_snapshot(&metadata);
+    assert_eq!(
+        rebuilt, protocol_snapshot,
+        "GRES metadata/runtime split must rebuild the original protocol snapshot"
+    );
+
+    let payload =
+        common::encode_snapshot_payload(&protocol_snapshot).expect("encode GRES snapshot payload");
+    let decoded = common::decode_snapshot_payload(&payload).expect("decode GRES snapshot payload");
+    assert_eq!(
+        decoded, protocol_snapshot,
+        "GRES snapshot must round-trip through the binary payload format"
+    );
+}
+
+#[cfg(test)]
+pub fn validate_gres_node_snapshot_contract(snapshot: &GresNodeSnapshot) -> Result<(), String> {
+    if snapshot.hostname.trim().is_empty() {
+        return Err("hostname must not be empty".to_string());
+    }
+    if snapshot
+        .driver_version
+        .as_deref()
+        .is_some_and(|version| version.trim().is_empty())
+    {
+        return Err("driver_version must be omitted instead of empty".to_string());
+    }
+
+    let mut expected_index = 0u8;
+    let mut uuids = std::collections::HashSet::new();
+
+    for resource in &snapshot.resources {
+        if resource.index != expected_index {
+            return Err(format!(
+                "resource indices must be dense and zero-based; expected {}, got {}",
+                expected_index, resource.index
+            ));
+        }
+        expected_index = expected_index
+            .checked_add(1)
+            .ok_or_else(|| "resource index overflow".to_string())?;
+
+        if resource.name.trim().is_empty() {
+            return Err(format!(
+                "resource {} name must not be empty",
+                resource.index
+            ));
+        }
+        if resource.memory_total_mb == 0 {
+            return Err(format!(
+                "resource {} memory_total_mb must be greater than zero",
+                resource.index
+            ));
+        }
+        if resource.memory_used_mb > resource.memory_total_mb {
+            return Err(format!(
+                "resource {} memory_used_mb must not exceed memory_total_mb",
+                resource.index
+            ));
+        }
+        if resource.utilization_gres_percent > 100 {
+            return Err(format!(
+                "resource {} utilization_gres_percent must be <= 100",
+                resource.index
+            ));
+        }
+        if resource.utilization_memory_percent > 100 {
+            return Err(format!(
+                "resource {} utilization_memory_percent must be <= 100",
+                resource.index
+            ));
+        }
+
+        if let Some(uuid) = resource.uuid.as_deref() {
+            if uuid.trim().is_empty() {
+                return Err(format!(
+                    "resource {} uuid must be omitted instead of empty",
+                    resource.index
+                ));
+            }
+            if !uuids.insert(uuid.to_string()) {
+                return Err(format!("resource uuid {} is duplicated", uuid));
+            }
+        }
+
+        for process in &resource.processes {
+            if process.pid == 0 {
+                return Err(format!(
+                    "resource {} process pid must not be zero",
+                    resource.index
+                ));
+            }
+            if process.used_memory_mb > resource.memory_total_mb {
+                return Err(format!(
+                    "resource {} process {} used memory exceeds resource total memory",
+                    resource.index, process.pid
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -113,11 +323,11 @@ impl NvmlCollector {
     }
 }
 
-impl GpuCollector for NvmlCollector {
-    fn collect(&self) -> Result<ServerGpuSnapshot, ErrorCode> {
+impl GresCollector for NvmlCollector {
+    fn collect_gres(&self) -> Result<GresNodeSnapshot, ErrorCode> {
         #[cfg(feature = "nvml")]
         {
-            self.inner.collect()
+            self.inner.collect_gres()
         }
 
         #[cfg(not(feature = "nvml"))]
@@ -125,13 +335,6 @@ impl GpuCollector for NvmlCollector {
             Err(ErrorCode::NvmlUnavailable)
         }
     }
-}
-
-pub fn mock_nvml_requested_from_env() -> bool {
-    std::env::var(COLLECTOR_ENV)
-        .map(|v| v.eq_ignore_ascii_case("mock"))
-        .unwrap_or(false)
-        || env_truthy(FORCE_MOCK_ENV)
 }
 
 fn simulate_nvml_missing() -> bool {
@@ -144,47 +347,38 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(any(test, feature = "mock-nvml"))]
-fn mock_gpu_count_from_env() -> u8 {
-    std::env::var(MOCK_GPU_COUNT_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .map(|value| value.clamp(1, u8::MAX as u16) as u8)
-        .unwrap_or(1)
-}
-
-#[cfg(any(test, feature = "mock-nvml"))]
-fn mock_snapshot(hostname: String, gpu_count: u8) -> ServerGpuSnapshot {
-    ServerGpuSnapshot {
+#[cfg(test)]
+fn test_snapshot(hostname: String, gres_count: u8) -> ServerGresSnapshot {
+    ServerGresSnapshot {
         hostname: hostname.clone(),
-        driver_version: Some("mock-driver".to_string()),
-        gpus: (0..gpu_count)
+        driver_version: Some("test-driver".to_string()),
+        gres: (0..gres_count)
             .map(|index| {
                 let index_u64 = index as u64;
-                GpuInfo {
+                GresInfo {
                     index,
-                    name: format!("NVIDIA Mock GPU {index}"),
+                    name: format!("NVIDIA Test GPU {index}"),
                     temperature_c: Some(30 + index as u32),
                     uuid: Some(format!(
-                        "GPU-MOCK-{}-{index:04}",
+                        "GRES-TEST-{}-{index:04}",
                         sanitize_uuid_part(&hostname)
                     )),
-                    memory: GpuMemory {
+                    memory: GresMemory {
                         used_mb: 1_234 + index_u64 * 512,
                         total_mb: 16_384 + index_u64 * 1_024,
                     },
-                    utilization: GpuUtilization {
-                        gpu_percent: (87u16.saturating_sub(index as u16 * 7)).max(1) as u8,
+                    utilization: GresUtilization {
+                        gres_percent: (87u16.saturating_sub(index as u16 * 7)).max(1) as u8,
                         memory_percent: (8 + index).min(100),
                     },
                     processes: vec![
-                        GpuProcessInfo {
+                        GresProcessInfo {
                             pid: 4_242 + index as u32 * 10,
                             uid: 1000 + index as u32,
-                            command: Some(format!("python train_gpu_{index}.py")),
+                            command: Some(format!("python train_gres_{index}.py")),
                             used_memory_mb: 768 + index_u64 * 128,
                         },
-                        GpuProcessInfo {
+                        GresProcessInfo {
                             pid: 4_243 + index as u32 * 10,
                             uid: 2000 + index as u32,
                             command: Some("nvidia-smi dmon".to_string()),
@@ -197,7 +391,7 @@ fn mock_snapshot(hostname: String, gpu_count: u8) -> ServerGpuSnapshot {
     }
 }
 
-#[cfg(any(test, feature = "mock-nvml"))]
+#[cfg(test)]
 fn sanitize_uuid_part(input: &str) -> String {
     input
         .chars()
@@ -209,14 +403,14 @@ fn sanitize_uuid_part(input: &str) -> String {
 mod real_nvml {
     use chrono::Local;
     use common::{
-        ErrorCode, GpuInfo, GpuMemory, GpuProcessInfo, GpuUtilization, ServerGpuSnapshot,
+        ErrorCode, GresInfo, GresMemory, GresProcessInfo, GresUtilization, ServerGresSnapshot,
     };
     use nvml_wrapper::enum_wrappers::device::TemperatureSensor;
     use nvml_wrapper::enums::device::UsedGpuMemory;
     use nvml_wrapper::Nvml;
     use std::{collections::HashSet, ffi::OsStr, fmt::Debug, fs};
 
-    use crate::collector::GpuCollector;
+    use crate::collector::{GresCollector, GresNodeSnapshot};
 
     #[derive(Debug)]
     pub struct RealNvmlCollector {
@@ -242,13 +436,13 @@ mod real_nvml {
         }
     }
 
-    impl GpuCollector for RealNvmlCollector {
-        fn collect(&self) -> Result<ServerGpuSnapshot, ErrorCode> {
+    impl RealNvmlCollector {
+        fn collect_gres_snapshot(&self) -> Result<ServerGresSnapshot, ErrorCode> {
             let count = self.nvml.device_count().map_err(|e| {
                 log_nvml_error("device_count", &e);
                 ErrorCode::NvmlUnavailable
             })?;
-            let mut gpus = Vec::with_capacity(count as usize);
+            let mut gres = Vec::with_capacity(count as usize);
 
             for index in 0..count.min(u8::MAX as u32) {
                 let device = self.nvml.device_by_index(index).map_err(|e| {
@@ -266,28 +460,35 @@ mod real_nvml {
                 let temperature_c = device.temperature(TemperatureSensor::Gpu).ok();
                 let processes = collect_processes(&device);
 
-                gpus.push(GpuInfo {
+                gres.push(GresInfo {
                     index: index as u8,
                     name: device.name().unwrap_or_else(|_| "unknown".to_string()),
                     temperature_c,
                     uuid: device.uuid().ok(),
-                    memory: GpuMemory {
+                    memory: GresMemory {
                         used_mb: memory.used / 1024 / 1024,
                         total_mb: memory.total / 1024 / 1024,
                     },
-                    utilization: GpuUtilization {
-                        gpu_percent: utilization.gpu.min(100) as u8,
+                    utilization: GresUtilization {
+                        gres_percent: utilization.gpu.min(100) as u8,
                         memory_percent: utilization.memory.min(100) as u8,
                     },
                     processes,
                 });
             }
 
-            Ok(ServerGpuSnapshot {
+            Ok(ServerGresSnapshot {
                 hostname: self.hostname.clone(),
                 driver_version: self.nvml.sys_driver_version().ok(),
-                gpus,
+                gres,
             })
+        }
+    }
+
+    impl GresCollector for RealNvmlCollector {
+        fn collect_gres(&self) -> Result<GresNodeSnapshot, ErrorCode> {
+            self.collect_gres_snapshot()
+                .map(GresNodeSnapshot::from_gres_snapshot)
         }
     }
 
@@ -311,7 +512,7 @@ mod real_nvml {
         );
     }
 
-    fn collect_processes(device: &nvml_wrapper::Device<'_>) -> Vec<GpuProcessInfo> {
+    fn collect_processes(device: &nvml_wrapper::Device<'_>) -> Vec<GresProcessInfo> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for process in device
@@ -323,17 +524,17 @@ mod real_nvml {
             if !seen.insert(process.pid) {
                 continue;
             }
-            out.push(GpuProcessInfo {
+            out.push(GresProcessInfo {
                 pid: process.pid,
                 uid: uid_for_pid(process.pid).unwrap_or(u32::MAX),
                 command: command_for_pid(process.pid),
-                used_memory_mb: used_gpu_memory_mb(process.used_gpu_memory),
+                used_memory_mb: used_gres_memory_mb(process.used_gpu_memory),
             });
         }
         out
     }
 
-    fn used_gpu_memory_mb(memory: UsedGpuMemory) -> u64 {
+    fn used_gres_memory_mb(memory: UsedGpuMemory) -> u64 {
         match memory {
             UsedGpuMemory::Used(bytes) => bytes / 1024 / 1024,
             UsedGpuMemory::Unavailable => 0,
@@ -360,93 +561,115 @@ mod real_nvml {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::SnapshotSummary;
-    use common::{decode_snapshot_payload, encode_snapshot_payload};
 
     #[test]
-    fn mock_nvml_collector_returns_expected_snapshot() {
-        let snapshot = MockNvmlCollector::new("node-mock")
-            .collect()
-            .expect("mock collect");
-        assert_eq!(snapshot.hostname, "node-mock");
-        assert_eq!(snapshot.gpu_num(), 1);
-        assert_eq!(snapshot.avg_utilization(), 87);
-        assert_eq!(snapshot.gpus[0].name, "NVIDIA Mock GPU 0");
-        assert_eq!(snapshot.gpus[0].utilization.gpu_percent, 87);
-        assert_eq!(snapshot.gpus[0].memory.used_mb, 1_234);
-        assert_eq!(snapshot.gpus[0].memory.total_mb, 16_384);
-        assert_eq!(snapshot.gpus[0].processes.len(), 2);
-        assert_eq!(snapshot.gpus[0].processes[0].uid, 1000);
+    fn test_gres_collector_returns_expected_snapshot() {
+        let snapshot = TestGresCollector::new("node-test")
+            .collect_gres_snapshot()
+            .expect("test collect");
+        assert_eq!(snapshot.hostname, "node-test");
+        assert_eq!(snapshot.gres.len(), 1);
+        assert_eq!(snapshot.gres[0].utilization.gres_percent, 87);
+        assert_eq!(snapshot.gres[0].name, "NVIDIA Test GPU 0");
+        assert_eq!(snapshot.gres[0].utilization.gres_percent, 87);
+        assert_eq!(snapshot.gres[0].memory.used_mb, 1_234);
+        assert_eq!(snapshot.gres[0].memory.total_mb, 16_384);
+        assert_eq!(snapshot.gres[0].processes.len(), 2);
+        assert_eq!(snapshot.gres[0].processes[0].uid, 1000);
     }
 
     #[test]
-    fn mock_nvml_collector_generates_multi_gpu_multi_process_snapshot() {
-        let snapshot = MockNvmlCollector::with_gpu_count("node-a", 2)
-            .collect()
-            .expect("mock collect");
+    fn test_gres_collector_generates_multi_gres_multi_process_snapshot() {
+        let snapshot = TestGresCollector::with_gres_count("node-a", 2)
+            .collect_gres_snapshot()
+            .expect("test collect");
 
         assert_eq!(snapshot.hostname, "node-a");
-        assert_eq!(snapshot.gpus.len(), 2);
-        assert_eq!(snapshot.gpus[0].index, 0);
-        assert_eq!(snapshot.gpus[1].index, 1);
+        assert_eq!(snapshot.gres.len(), 2);
+        assert_eq!(snapshot.gres[0].index, 0);
+        assert_eq!(snapshot.gres[1].index, 1);
         assert_eq!(
-            snapshot.gpus[0].uuid.as_deref(),
-            Some("GPU-MOCK-node-a-0000")
+            snapshot.gres[0].uuid.as_deref(),
+            Some("GRES-TEST-node-a-0000")
         );
         assert_eq!(
-            snapshot.gpus[1].uuid.as_deref(),
-            Some("GPU-MOCK-node-a-0001")
+            snapshot.gres[1].uuid.as_deref(),
+            Some("GRES-TEST-node-a-0001")
         );
-        assert_eq!(snapshot.gpus[0].processes.len(), 2);
-        assert_eq!(snapshot.gpus[1].processes.len(), 2);
-        assert_eq!(
-            snapshot.gpus[1].processes[0].command.as_deref(),
-            Some("python train_gpu_1.py")
-        );
+        assert_eq!(snapshot.gres[0].processes.len(), 2);
+        assert_eq!(snapshot.gres[1].processes.len(), 2);
+        assert_eq!(snapshot.gres[1].processes[0].command, None);
     }
 
     #[test]
-    fn mock_nvml_env_and_payload_roundtrip_preserve_hostname_and_uuid() {
-        let _guard = ENV_TEST_LOCK.lock().expect("env test lock");
-        std::env::set_var(MOCK_HOSTNAME_ENV, "node-b");
-        std::env::set_var(MOCK_GPU_COUNT_ENV, "2");
-
-        let snapshot = MockNvmlCollector::from_env("fallback-node")
-            .collect()
-            .expect("mock collect");
-        let payload = encode_snapshot_payload(&snapshot).expect("encode snapshot");
-        let decoded = decode_snapshot_payload(&payload).expect("decode snapshot");
-
-        std::env::remove_var(MOCK_HOSTNAME_ENV);
-        std::env::remove_var(MOCK_GPU_COUNT_ENV);
-
-        assert_eq!(decoded.hostname, "node-b");
-        assert_eq!(decoded.gpus.len(), 2);
-        assert_eq!(
-            decoded.gpus[0].uuid.as_deref(),
-            Some("GPU-MOCK-node-b-0000")
-        );
-        assert_eq!(
-            decoded.gpus[1].uuid.as_deref(),
-            Some("GPU-MOCK-node-b-0001")
-        );
+    fn gres_collector_contract_accepts_normalized_test_collector() {
+        let collector = TestGresCollector::with_gres_count("node-a", 2);
+        assert_gres_collector_contract(&collector);
     }
 
     #[test]
-    fn mock_nvml_env_is_detected() {
-        let _guard = ENV_TEST_LOCK.lock().expect("env test lock");
-        std::env::set_var(COLLECTOR_ENV, "mock");
-        assert!(mock_nvml_requested_from_env());
-        std::env::remove_var(COLLECTOR_ENV);
+    fn gres_snapshot_contract_accepts_empty_resource_inventory() {
+        let snapshot = GresNodeSnapshot {
+            hostname: "node-empty".to_string(),
+            driver_version: None,
+            resources: Vec::new(),
+        };
+        validate_gres_node_snapshot_contract(&snapshot).expect("empty inventory is valid");
+    }
 
-        std::env::set_var(FORCE_MOCK_ENV, "1");
-        assert!(mock_nvml_requested_from_env());
-        std::env::remove_var(FORCE_MOCK_ENV);
+    #[test]
+    fn gres_snapshot_contract_rejects_non_dense_indices() {
+        let mut snapshot = TestGresCollector::with_gres_count("node-a", 2)
+            .collect_gres()
+            .expect("test collect");
+        snapshot.resources[1].index = 3;
+
+        let error = validate_gres_node_snapshot_contract(&snapshot).unwrap_err();
+        assert!(error.contains("dense and zero-based"), "{error}");
+    }
+
+    #[test]
+    fn gres_snapshot_contract_rejects_invalid_resource_fields() {
+        let mut snapshot = TestGresCollector::new("node-a")
+            .collect_gres()
+            .expect("test collect");
+        snapshot.resources[0].name.clear();
+        snapshot.resources[0].memory_used_mb = 2;
+        snapshot.resources[0].memory_total_mb = 1;
+        snapshot.resources[0].utilization_gres_percent = 101;
+
+        let error = validate_gres_node_snapshot_contract(&snapshot).unwrap_err();
+        assert!(error.contains("name must not be empty"), "{error}");
+    }
+
+    #[test]
+    fn gres_snapshot_contract_rejects_duplicate_uuid() {
+        let mut snapshot = TestGresCollector::with_gres_count("node-a", 2)
+            .collect_gres()
+            .expect("test collect");
+        snapshot.resources[1].uuid = snapshot.resources[0].uuid.clone();
+
+        let error = validate_gres_node_snapshot_contract(&snapshot).unwrap_err();
+        assert!(error.contains("duplicated"), "{error}");
+    }
+
+    #[test]
+    fn gres_snapshot_contract_rejects_invalid_process_fields() {
+        let mut snapshot = TestGresCollector::new("node-a")
+            .collect_gres()
+            .expect("test collect");
+        snapshot.resources[0].processes[0].pid = 0;
+
+        let error = validate_gres_node_snapshot_contract(&snapshot).unwrap_err();
+        assert!(error.contains("process pid must not be zero"), "{error}");
     }
 
     #[test]
     fn degraded_collector_returns_error() {
         let collector = DegradedCollector::new(ErrorCode::NvmlUnavailable);
-        assert_eq!(collector.collect().unwrap_err(), ErrorCode::NvmlUnavailable);
+        assert_eq!(
+            collector.collect_gres().unwrap_err(),
+            ErrorCode::NvmlUnavailable
+        );
     }
 }
