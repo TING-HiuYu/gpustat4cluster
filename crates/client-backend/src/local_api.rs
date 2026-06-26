@@ -99,7 +99,7 @@ impl LocalApiState {
                     connection_id: format!("conn-{:03}", index_base + idx + 1),
                     hostname: node.hostname.clone(),
                     num: 0,
-                    server_gpus: Vec::new(),
+                    server_gres: Vec::new(),
                     record_timestamp: node.ts_ms,
                     addr: node.addr,
                     last_snapshot: None,
@@ -633,7 +633,7 @@ fn refresh_stale_cache_for_query_tcp(state: &LocalApiState) -> Result<(), String
             Ok(snapshot) => {
                 let latency_us = query_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
                 let hostname = snapshot.hostname.clone();
-                let gpu_num = snapshot.gpus.len();
+                let gpu_num = snapshot.gres.len();
                 if !target.had_snapshot {
                     logger::transport_info(
                         "tcp",

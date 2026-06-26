@@ -1,6 +1,6 @@
 use common::{
-    protocol::decode_snapshot_payload as common_decode_snapshot_payload, GpuProcessInfo,
-    ServerGpuSnapshot,
+    protocol::decode_snapshot_payload as common_decode_snapshot_payload, GresProcessInfo,
+    ServerGresSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -64,11 +64,11 @@ pub struct NodeView {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delay_us: Option<u64>,
-    pub gpus: Vec<GpuView>,
+    pub gres: Vec<GresView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GpuView {
+pub struct GresView {
     pub index: u8,
     #[serde(default)]
     pub name: String,
@@ -144,10 +144,10 @@ fn node_view_from_entry(entry: &crate::cache::ConnectionCacheEntry) -> NodeView 
         );
     }
 
-    let (timestamp_ms, gpus) = parse_payload_view(&entry.server_gpus).unwrap_or_else(|| {
+    let (timestamp_ms, gres) = parse_payload_view(&entry.server_gres).unwrap_or_else(|| {
         (
             entry.record_timestamp,
-            parse_legacy_gpu_views(&entry.server_gpus),
+            parse_legacy_gres_views(&entry.server_gres),
         )
     });
 
@@ -161,7 +161,7 @@ fn node_view_from_entry(entry: &crate::cache::ConnectionCacheEntry) -> NodeView 
         stale: entry.last_snapshot.is_none(),
         error: entry.last_error.clone(),
         delay_us: entry.last_query_latency_us,
-        gpus,
+        gres,
     }
 }
 
@@ -169,7 +169,7 @@ pub fn node_view_from_snapshot(
     connection_id: impl Into<String>,
     addr: SocketAddr,
     timestamp_ms: i64,
-    snapshot: &ServerGpuSnapshot,
+    snapshot: &ServerGresSnapshot,
     delay_us: Option<u64>,
 ) -> NodeView {
     NodeView {
@@ -178,21 +178,21 @@ pub fn node_view_from_snapshot(
         addr: addr.to_string(),
         timestamp_ms,
         driver_version: snapshot.driver_version.clone(),
-        num: snapshot.gpus.len().min(u8::MAX as usize) as u8,
+        num: snapshot.gres.len().min(u8::MAX as usize) as u8,
         stale: false,
         error: None,
         delay_us,
-        gpus: gpu_views_from_snapshot(snapshot),
+        gres: gres_views_from_snapshot(snapshot),
     }
 }
 
-fn parse_payload_view(raw: &[u8]) -> Option<(i64, Vec<GpuView>)> {
+fn parse_payload_view(raw: &[u8]) -> Option<(i64, Vec<GresView>)> {
     let s = std::str::from_utf8(raw).ok()?;
     let value: Value = serde_json::from_str(s).ok()?;
 
     if let Some(payload) = payload_bytes_from_server_json(&value) {
         let (timestamp_ms, snapshot) = decode_snapshot_payload(&payload)?;
-        return Some((timestamp_ms, gpu_views_from_snapshot(&snapshot)));
+        return Some((timestamp_ms, gres_views_from_snapshot(&snapshot)));
     }
 
     None
@@ -258,28 +258,28 @@ fn push_base64_chunk(out: &mut Vec<u8>, chunk: [u8; 4]) -> Option<()> {
     Some(())
 }
 
-fn decode_snapshot_payload(payload: &[u8]) -> Option<(i64, ServerGpuSnapshot)> {
+fn decode_snapshot_payload(payload: &[u8]) -> Option<(i64, ServerGresSnapshot)> {
     let snapshot = common_decode_snapshot_payload(payload).ok()?;
     Some((now_ms(), snapshot))
 }
 
-pub fn gpu_views_from_snapshot(snapshot: &ServerGpuSnapshot) -> Vec<GpuView> {
+pub fn gres_views_from_snapshot(snapshot: &ServerGresSnapshot) -> Vec<GresView> {
     snapshot
-        .gpus
+        .gres
         .iter()
-        .map(|gpu| GpuView {
-            index: gpu.index,
-            name: gpu.name.clone(),
-            temperature_c: gpu.temperature_c,
-            util: gpu.utilization.gpu_percent.min(100),
-            mem_used_mb: clamp_u64_to_u32(gpu.memory.used_mb),
-            mem_total_mb: clamp_u64_to_u32(gpu.memory.total_mb),
-            processes: Some(process_views_from_snapshot(&gpu.processes)),
+        .map(|gres| GresView {
+            index: gres.index,
+            name: gres.name.clone(),
+            temperature_c: gres.temperature_c,
+            util: gres.utilization.gres_percent.min(100),
+            mem_used_mb: clamp_u64_to_u32(gres.memory.used_mb),
+            mem_total_mb: clamp_u64_to_u32(gres.memory.total_mb),
+            processes: Some(process_views_from_snapshot(&gres.processes)),
         })
         .collect()
 }
 
-fn process_views_from_snapshot(processes: &[GpuProcessInfo]) -> Vec<ProcessView> {
+fn process_views_from_snapshot(processes: &[GresProcessInfo]) -> Vec<ProcessView> {
     processes
         .iter()
         .map(|process| ProcessView {
@@ -333,14 +333,14 @@ fn apply_user_filter(node: &mut NodeView, user: Option<&str>) {
         return;
     };
 
-    for gpu in &mut node.gpus {
-        if let Some(processes) = &mut gpu.processes {
+    for gres in &mut node.gres {
+        if let Some(processes) = &mut gres.processes {
             processes.retain(|process| process.username == user);
         }
     }
 }
 
-fn parse_legacy_gpu_views(raw: &[u8]) -> Vec<GpuView> {
+fn parse_legacy_gres_views(raw: &[u8]) -> Vec<GresView> {
     let s = String::from_utf8_lossy(raw);
     if let Some(view) = parse_round1_server_json(&s) {
         return view;
@@ -349,14 +349,14 @@ fn parse_legacy_gpu_views(raw: &[u8]) -> Vec<GpuView> {
     parse_round1_csv(&s)
 }
 
-fn parse_round1_csv(s: &str) -> Vec<GpuView> {
+fn parse_round1_csv(s: &str) -> Vec<GresView> {
     s.split(';')
         .filter_map(|item| {
             let parts: Vec<_> = item.split(',').collect();
             if parts.len() != 4 {
                 return None;
             }
-            Some(GpuView {
+            Some(GresView {
                 index: parts[0].parse().ok()?,
                 name: "GPU".to_string(),
                 temperature_c: None,
@@ -369,14 +369,14 @@ fn parse_round1_csv(s: &str) -> Vec<GpuView> {
         .collect()
 }
 
-fn parse_round1_server_json(s: &str) -> Option<Vec<GpuView>> {
+fn parse_round1_server_json(s: &str) -> Option<Vec<GresView>> {
     let value: Value = serde_json::from_str(s).ok()?;
-    let gpu_num = value.get("gpu_num")?.as_u64()?;
+    let gres_num = value.get("gres_num")?.as_u64()?;
     let util = value.get("avg_utilization")?.as_u64()?.min(100) as u8;
 
     Some(
-        (0..gpu_num.min(u8::MAX as u64))
-            .map(|idx| GpuView {
+        (0..gres_num.min(u8::MAX as u64))
+            .map(|idx| GresView {
                 index: idx as u8,
                 name: "GPU".to_string(),
                 temperature_c: None,
@@ -404,34 +404,34 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use common::{
-        protocol::encode_snapshot_payload, GpuInfo, GpuMemory, GpuProcessInfo, GpuUtilization,
+        protocol::encode_snapshot_payload, GresInfo, GresMemory, GresProcessInfo, GresUtilization,
     };
 
-    fn snapshot() -> ServerGpuSnapshot {
-        ServerGpuSnapshot {
+    fn snapshot() -> ServerGresSnapshot {
+        ServerGresSnapshot {
             hostname: "node-a".to_string(),
             driver_version: None,
-            gpus: vec![GpuInfo {
+            gres: vec![GresInfo {
                 index: 0,
                 name: "NVIDIA A100".to_string(),
                 temperature_c: None,
-                uuid: Some("GPU-123".to_string()),
-                memory: GpuMemory {
+                uuid: Some("GRES-123".to_string()),
+                memory: GresMemory {
                     used_mb: 1024,
                     total_mb: 81920,
                 },
-                utilization: GpuUtilization {
-                    gpu_percent: 75,
+                utilization: GresUtilization {
+                    gres_percent: 75,
                     memory_percent: 20,
                 },
                 processes: vec![
-                    GpuProcessInfo {
+                    GresProcessInfo {
                         pid: 1234,
                         uid: 1000,
                         command: Some("python train.py".to_string()),
                         used_memory_mb: 512,
                     },
-                    GpuProcessInfo {
+                    GresProcessInfo {
                         pid: 5678,
                         uid: 1001,
                         command: Some("python eval.py".to_string()),
@@ -473,11 +473,11 @@ mod tests {
 
     #[test]
     fn backend_response_json_decodes() {
-        let raw = r#"{"nodes":[{"connection_id":"conn-001","hostname":"node-a","addr":"10.0.0.1:30000","timestamp_ms":1,"num":1,"gpus":[{"index":0,"util":42,"mem_used_mb":1024,"mem_total_mb":8192}]}]}"#;
+        let raw = r#"{"nodes":[{"connection_id":"conn-001","hostname":"node-a","addr":"10.0.0.1:30000","timestamp_ms":1,"num":1,"gres":[{"index":0,"util":42,"mem_used_mb":1024,"mem_total_mb":8192}]}]}"#;
         let decoded: QueryResponse = serde_json::from_str(raw).expect("decode response");
         assert_eq!(decoded.meta.status, "unknown");
         assert_eq!(decoded.nodes[0].hostname, "node-a");
-        assert_eq!(decoded.nodes[0].gpus[0].util, 42);
+        assert_eq!(decoded.nodes[0].gres[0].util, 42);
     }
 
     #[test]
@@ -492,16 +492,29 @@ mod tests {
     }
 
     #[test]
+    fn query_response_serializes_gres_field_not_legacy_gpus() {
+        let mut rows = CacheMap::new();
+        let addr: SocketAddr = "127.0.0.1:39400".parse().unwrap();
+        crate::cache::upsert_snapshot(&mut rows, "conn-001", addr, snapshot(), Some(42));
+
+        let json = serde_json::to_value(build_query_response(&rows, None, None)).expect("json");
+        let node = &json["nodes"][0];
+        assert!(node.get("gres").is_some());
+        assert!(node.get("gpus").is_none());
+        assert_eq!(node["gres"][0]["util"], 75);
+    }
+
+    #[test]
     fn multi_node_query_response_is_sorted_and_counts_nodes() {
         let mut rows = CacheMap::new();
         let addr_b: SocketAddr = "127.0.0.1:39401".parse().unwrap();
         let addr_a: SocketAddr = "127.0.0.1:39400".parse().unwrap();
         let mut snapshot_b = snapshot();
         snapshot_b.hostname = "node-b".to_string();
-        snapshot_b.gpus[0].processes[0].uid = 1001;
+        snapshot_b.gres[0].processes[0].uid = 1001;
         let mut snapshot_a = snapshot();
         snapshot_a.hostname = "node-a".to_string();
-        snapshot_a.gpus[0].processes[0].uid = 1000;
+        snapshot_a.gres[0].processes[0].uid = 1000;
 
         crate::cache::upsert_snapshot(&mut rows, "conn-002", addr_b, snapshot_b, None);
         crate::cache::upsert_snapshot(&mut rows, "conn-001", addr_a, snapshot_a, Some(321));
@@ -512,18 +525,18 @@ mod tests {
         assert_eq!(response.nodes[0].hostname, "node-a");
         assert_eq!(response.nodes[1].hostname, "node-b");
         assert_eq!(
-            response.nodes[0].gpus[0].processes.as_ref().unwrap()[0].uid,
+            response.nodes[0].gres[0].processes.as_ref().unwrap()[0].uid,
             1000
         );
         assert_eq!(
-            response.nodes[1].gpus[0].processes.as_ref().unwrap()[0].uid,
+            response.nodes[1].gres[0].processes.as_ref().unwrap()[0].uid,
             1001
         );
     }
 
     #[test]
-    fn common_snapshot_maps_to_gpu_view_with_processes() {
-        let views = gpu_views_from_snapshot(&snapshot());
+    fn common_snapshot_maps_to_gres_view_with_processes() {
+        let views = gres_views_from_snapshot(&snapshot());
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].util, 75);
         assert_eq!(views[0].mem_total_mb, 81920);
@@ -543,7 +556,7 @@ mod tests {
         assert_eq!(node.num, 1);
         assert!(!node.stale);
         assert_eq!(node.delay_us, Some(321));
-        assert_eq!(node.gpus[0].processes.as_ref().unwrap()[0].uid, 1000);
+        assert_eq!(node.gres[0].processes.as_ref().unwrap()[0].uid, 1000);
     }
 
     #[test]
@@ -566,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn user_filter_trims_processes_without_dropping_gpu_rows() {
+    fn user_filter_trims_processes_without_dropping_gres_rows() {
         let mut node = NodeView {
             connection_id: "conn-001".to_string(),
             hostname: "node-a".to_string(),
@@ -577,26 +590,26 @@ mod tests {
             stale: false,
             error: None,
             delay_us: None,
-            gpus: gpu_views_from_snapshot(&snapshot()),
+            gres: gres_views_from_snapshot(&snapshot()),
         };
 
         let user = username_for_uid(1000);
         apply_user_filter(&mut node, Some(&user));
-        let processes = node.gpus[0].processes.as_ref().unwrap();
+        let processes = node.gres[0].processes.as_ref().unwrap();
         assert_eq!(processes.len(), 1);
         assert_eq!(processes[0].uid, 1000);
     }
 
     #[test]
-    fn round1_server_json_payload_maps_to_gpu_view() {
-        let views = parse_legacy_gpu_views(br#"{"gpu_num":2,"avg_utilization":42}"#);
+    fn round1_server_json_payload_maps_to_gres_view() {
+        let views = parse_legacy_gres_views(br#"{"gres_num":2,"avg_utilization":42}"#);
         assert_eq!(views.len(), 2);
         assert_eq!(views[1].util, 42);
     }
 
     #[test]
-    fn round1_csv_payload_still_maps_to_gpu_view() {
-        let views = parse_legacy_gpu_views(b"0,35,2048,8192;1,76,6144,8192");
+    fn round1_csv_payload_still_maps_to_gres_view() {
+        let views = parse_legacy_gres_views(b"0,35,2048,8192;1,76,6144,8192");
         assert_eq!(views.len(), 2);
         assert_eq!(views[0].mem_used_mb, 2048);
         assert_eq!(views[1].util, 76);

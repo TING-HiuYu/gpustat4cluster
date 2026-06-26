@@ -15,7 +15,7 @@ pub const FRAME_HEADER_LEN: usize = 18;
 /// Deprecated: snapshot payloads no longer carry an external timestamp prefix.
 #[deprecated(
     since = "0.1.0",
-    note = "timestamp_ms is part of ServerGpuSnapshot; use encode_snapshot_payload instead"
+    note = "snapshot payloads no longer include a timestamp prefix; use encode_snapshot_payload instead"
 )]
 pub const PAYLOAD_TIMESTAMP_LEN: usize = 8;
 /// v1 握手中 `payload_len` 的最大可表达长度。
@@ -41,7 +41,7 @@ pub enum PayloadDecodeError {
     DeserializeFailed(String),
 }
 
-/// Binary frame type identifiers for target KCP transport.
+/// Binary frame type identifiers for stream and datagram transports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FrameType {
@@ -54,6 +54,8 @@ pub enum FrameType {
     DataPayload = 7,
     Heartbeat = 8,
     Disconnect = 9,
+    MetadataPayload = 10,
+    RuntimePayload = 11,
 }
 
 impl TryFrom<u8> for FrameType {
@@ -70,12 +72,14 @@ impl TryFrom<u8> for FrameType {
             7 => Ok(Self::DataPayload),
             8 => Ok(Self::Heartbeat),
             9 => Ok(Self::Disconnect),
+            10 => Ok(Self::MetadataPayload),
+            11 => Ok(Self::RuntimePayload),
             other => Err(FrameHeaderError::UnknownFrameType(other)),
         }
     }
 }
 
-/// Fixed binary frame header used by the target KCP transport.
+/// Fixed binary frame header used by stream and datagram transports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
     pub version: u8,
@@ -183,17 +187,46 @@ impl From<FrameHeaderError> for FrameDecodeError {
     RkyvSerialize,
     RkyvDeserialize,
 )]
-pub struct ServerGpuSnapshot {
-    /// Server hostname as reported in `HandshakeInfo`; independent per node.
+pub struct ServerGresSnapshot {
+    /// Server hostname; independent per node.
     pub hostname: String,
     /// NVIDIA driver version reported by NVML when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver_version: Option<String>,
-    /// Full GPU list for this server/node; empty means the node currently reports no GPUs.
-    pub gpus: Vec<GpuInfo>,
+    /// Full GRES list for this server/node; empty means the node currently reports no resources.
+    pub gres: Vec<GresInfo>,
 }
 
-/// Stable GPU record shared by JSON bootstrap and rkyv payloads.
+pub type ServerGpuSnapshot = ServerGresSnapshot;
+pub type GpuInfo = GresInfo;
+pub type GpuMemory = GresMemory;
+pub type GpuUtilization = GresUtilization;
+pub type GpuProcessInfo = GresProcessInfo;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct HandshakeInfo {
+    pub version: u8,
+    pub hostname: String,
+    pub gpu_num: u8,
+    pub payload_len: u16,
+}
+
+impl HandshakeInfo {
+    pub fn current(hostname: impl Into<String>, gpu_num: u8, payload_len: u16) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            hostname: hostname.into(),
+            gpu_num,
+            payload_len,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), crate::ErrorCode> {
+        validate_protocol_version(self.version)
+    }
+}
+
+/// Stable GRES record shared by JSON bootstrap and rkyv payloads.
 #[derive(
     Debug,
     Clone,
@@ -205,25 +238,25 @@ pub struct ServerGpuSnapshot {
     RkyvSerialize,
     RkyvDeserialize,
 )]
-pub struct GpuInfo {
-    /// Zero-based GPU index from this node's collector/NVML device order, not a cluster-wide ID.
+pub struct GresInfo {
+    /// Zero-based resource index from this node's collector order, not a cluster-wide ID.
     pub index: u8,
-    /// Human-readable GPU product name, for example `NVIDIA A100`.
+    /// Human-readable resource name, for example `NVIDIA A100`.
     pub name: String,
-    /// GPU temperature in Celsius when available.
+    /// Resource temperature in Celsius when available.
     #[serde(default)]
     pub temperature_c: Option<u32>,
-    /// Stable GPU UUID when the collector can provide one; mock data should keep this deterministic.
+    /// Stable resource UUID when the collector can provide one; test data should keep this deterministic.
     pub uuid: Option<String>,
     /// Memory counters in MiB.
-    pub memory: GpuMemory,
+    pub memory: GresMemory,
     /// Utilization counters in percent (`0..=100`).
-    pub utilization: GpuUtilization,
-    /// Best-effort processes attributed to this GPU; empty when unavailable or no processes are present.
-    pub processes: Vec<GpuProcessInfo>,
+    pub utilization: GresUtilization,
+    /// Best-effort processes attributed to this resource; empty when unavailable or no processes are present.
+    pub processes: Vec<GresProcessInfo>,
 }
 
-/// GPU memory counters in MiB.
+/// GRES memory counters in MiB.
 #[derive(
     Debug,
     Clone,
@@ -236,14 +269,14 @@ pub struct GpuInfo {
     RkyvSerialize,
     RkyvDeserialize,
 )]
-pub struct GpuMemory {
+pub struct GresMemory {
     /// Used framebuffer memory in MiB.
     pub used_mb: u64,
     /// Total framebuffer memory in MiB.
     pub total_mb: u64,
 }
 
-/// GPU utilization counters in percent (`0..=100`).
+/// GRES utilization counters in percent (`0..=100`).
 #[derive(
     Debug,
     Clone,
@@ -256,14 +289,14 @@ pub struct GpuMemory {
     RkyvSerialize,
     RkyvDeserialize,
 )]
-pub struct GpuUtilization {
-    /// GPU core utilization percent in the inclusive range `0..=100`.
-    pub gpu_percent: u8,
+pub struct GresUtilization {
+    /// Resource utilization percent in the inclusive range `0..=100`.
+    pub gres_percent: u8,
     /// Memory controller utilization percent in the inclusive range `0..=100`.
     pub memory_percent: u8,
 }
 
-/// Process record attributed to one GPU.
+/// Process record attributed to one GRES resource.
 #[derive(
     Debug,
     Clone,
@@ -275,15 +308,192 @@ pub struct GpuUtilization {
     RkyvSerialize,
     RkyvDeserialize,
 )]
-pub struct GpuProcessInfo {
+pub struct GresProcessInfo {
     /// OS process ID.
     pub pid: u32,
     /// Linux UID owning the process; client-side renderers may resolve it via NSS.
     pub uid: u32,
     /// Best-effort command or process name; `None` when unavailable.
     pub command: Option<String>,
-    /// GPU memory attributed to this process in MiB.
+    /// Resource memory attributed to this process in MiB.
     pub used_memory_mb: u64,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    SerdeSerialize,
+    SerdeDeserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct HostMetadata {
+    pub hostname: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_version: Option<String>,
+    pub gres: Vec<GresStaticInfo>,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    SerdeSerialize,
+    SerdeDeserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct GresStaticInfo {
+    pub index: u8,
+    pub name: String,
+    pub uuid: Option<String>,
+    pub memory_total_mb: u64,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    SerdeSerialize,
+    SerdeDeserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct RuntimeSnapshot {
+    pub gres: Vec<GresRuntimeInfo>,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    SerdeSerialize,
+    SerdeDeserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct GresRuntimeInfo {
+    pub index: u8,
+    #[serde(default)]
+    pub temperature_c: Option<u32>,
+    pub memory_used_mb: u64,
+    pub utilization: GresUtilization,
+    pub processes: Vec<GresProcessRuntimeInfo>,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    SerdeSerialize,
+    SerdeDeserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct GresProcessRuntimeInfo {
+    pub pid: u32,
+    pub uid: u32,
+    pub used_memory_mb: u64,
+}
+
+impl HostMetadata {
+    pub fn from_snapshot(snapshot: &ServerGresSnapshot) -> Self {
+        Self {
+            hostname: snapshot.hostname.clone(),
+            driver_version: snapshot.driver_version.clone(),
+            gres: snapshot
+                .gres
+                .iter()
+                .map(|gres| GresStaticInfo {
+                    index: gres.index,
+                    name: gres.name.clone(),
+                    uuid: gres.uuid.clone(),
+                    memory_total_mb: gres.memory.total_mb,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl RuntimeSnapshot {
+    pub fn from_snapshot(snapshot: &ServerGresSnapshot) -> Self {
+        Self {
+            gres: snapshot
+                .gres
+                .iter()
+                .map(|gres| GresRuntimeInfo {
+                    index: gres.index,
+                    temperature_c: gres.temperature_c,
+                    memory_used_mb: gres.memory.used_mb,
+                    utilization: gres.utilization,
+                    processes: gres
+                        .processes
+                        .iter()
+                        .map(|process| GresProcessRuntimeInfo {
+                            pid: process.pid,
+                            uid: process.uid,
+                            used_memory_mb: process.used_memory_mb,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn to_snapshot(&self, metadata: &HostMetadata) -> ServerGresSnapshot {
+        let gres = self
+            .gres
+            .iter()
+            .map(|runtime| {
+                let static_info = metadata
+                    .gres
+                    .iter()
+                    .find(|gres| gres.index == runtime.index);
+                GresInfo {
+                    index: runtime.index,
+                    name: static_info
+                        .map(|gres| gres.name.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    temperature_c: runtime.temperature_c,
+                    uuid: static_info.and_then(|gres| gres.uuid.clone()),
+                    memory: GresMemory {
+                        used_mb: runtime.memory_used_mb,
+                        total_mb: static_info
+                            .map(|gres| gres.memory_total_mb)
+                            .unwrap_or_default(),
+                    },
+                    utilization: runtime.utilization,
+                    processes: runtime
+                        .processes
+                        .iter()
+                        .map(|process| GresProcessInfo {
+                            pid: process.pid,
+                            uid: process.uid,
+                            command: None,
+                            used_memory_mb: process.used_memory_mb,
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+
+        ServerGresSnapshot {
+            hostname: metadata.hostname.clone(),
+            driver_version: metadata.driver_version.clone(),
+            gres,
+        }
+    }
 }
 
 /// 查询请求。
@@ -356,34 +566,6 @@ impl HandshakeRequest {
     }
 }
 
-/// Server 与 Client 首次建立连接时传递的握手信息。
-#[derive(Debug, Clone, SerdeSerialize, SerdeDeserialize, PartialEq, Eq)]
-pub struct HandshakeInfo {
-    /// 协议版本号。
-    pub version: u8,
-    /// 服务端主机名。
-    pub hostname: String,
-    /// GPU 数量。
-    pub gpu_num: u8,
-    /// 固定 payload 字节长度。
-    pub payload_len: u16,
-}
-
-impl HandshakeInfo {
-    pub fn new(hostname: impl Into<String>, gpu_num: u8, payload_len: u16) -> Self {
-        Self {
-            version: PROTOCOL_VERSION,
-            hostname: hostname.into(),
-            gpu_num,
-            payload_len,
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), crate::ErrorCode> {
-        validate_protocol_version(self.version)
-    }
-}
-
 /// 客户端向多播组发送的发现查询报文。
 #[derive(Debug, Clone, SerdeSerialize, SerdeDeserialize, PartialEq, Eq)]
 pub struct DiscoveryQuery {
@@ -402,12 +584,15 @@ pub struct DiscoveryAnnounce {
     pub ip: String,
     /// 服务端监听端口。
     pub port: u16,
-    /// KCP 监听端口；省略时兼容旧客户端使用 `port`。
-    #[serde(default)]
-    pub kcp_port: Option<u16>,
     /// TCP 监听端口；省略时兼容旧服务端使用 `port`。
     #[serde(default)]
     pub tcp_port: Option<u16>,
+    /// Legacy KCP listen port; retained so the GRES-only compatibility branch can still compile.
+    #[serde(default)]
+    pub kcp_port: Option<u16>,
+    /// UDP 监听端口；省略时兼容旧服务端使用 `port`。
+    #[serde(default)]
+    pub udp_port: Option<u16>,
     /// 建议客户端缓存该发现记录的秒数。
     #[serde(default)]
     pub ttl: Option<u16>,
@@ -444,11 +629,11 @@ pub fn validate_protocol_version(version: u8) -> Result<(), crate::ErrorCode> {
     }
 }
 
-/// Encode a complete `ServerGpuSnapshot` as the canonical GPU payload.
+/// Encode a complete `ServerGresSnapshot` as the canonical GRES payload.
 ///
-/// The returned bytes are the full rkyv archive for `ServerGpuSnapshot`.
+/// The returned bytes are the full rkyv archive for `ServerGresSnapshot`.
 pub fn encode_snapshot_payload(
-    snapshot: &ServerGpuSnapshot,
+    snapshot: &ServerGresSnapshot,
 ) -> Result<Vec<u8>, PayloadEncodeError> {
     let bytes = rkyv::to_bytes::<RkyvError>(snapshot)
         .map_err(|err| PayloadEncodeError::SerializeFailed(err.to_string()))?
@@ -461,11 +646,11 @@ pub fn encode_snapshot_payload(
     Ok(bytes)
 }
 
-/// Decode a GPU payload into an owned `ServerGpuSnapshot`.
+/// Decode a GRES payload into an owned `ServerGresSnapshot`.
 ///
 /// The function copies into an aligned buffer before deserializing so callers can
 /// pass payload slices directly from transport frames.
-pub fn decode_snapshot_payload(bytes: &[u8]) -> Result<ServerGpuSnapshot, PayloadDecodeError> {
+pub fn decode_snapshot_payload(bytes: &[u8]) -> Result<ServerGresSnapshot, PayloadDecodeError> {
     if bytes.is_empty() {
         return Err(PayloadDecodeError::Empty);
     }
@@ -473,7 +658,61 @@ pub fn decode_snapshot_payload(bytes: &[u8]) -> Result<ServerGpuSnapshot, Payloa
     let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
     aligned.extend_from_slice(bytes);
 
-    rkyv::from_bytes::<ServerGpuSnapshot, RkyvError>(&aligned)
+    rkyv::from_bytes::<ServerGresSnapshot, RkyvError>(&aligned)
+        .map_err(|err| PayloadDecodeError::DeserializeFailed(err.to_string()))
+}
+
+pub fn encode_metadata_payload(metadata: &HostMetadata) -> Result<Vec<u8>, PayloadEncodeError> {
+    encode_rkyv_payload(metadata)
+}
+
+pub fn decode_metadata_payload(bytes: &[u8]) -> Result<HostMetadata, PayloadDecodeError> {
+    decode_rkyv_payload(bytes)
+}
+
+pub fn encode_runtime_payload(snapshot: &RuntimeSnapshot) -> Result<Vec<u8>, PayloadEncodeError> {
+    encode_rkyv_payload(snapshot)
+}
+
+pub fn decode_runtime_payload(bytes: &[u8]) -> Result<RuntimeSnapshot, PayloadDecodeError> {
+    decode_rkyv_payload(bytes)
+}
+
+fn encode_rkyv_payload<T>(value: &T) -> Result<Vec<u8>, PayloadEncodeError>
+where
+    T: for<'a> RkyvSerialize<
+        rkyv::api::high::HighSerializer<
+            AlignedVec,
+            rkyv::ser::allocator::ArenaHandle<'a>,
+            RkyvError,
+        >,
+    >,
+{
+    let bytes = rkyv::to_bytes::<RkyvError>(value)
+        .map_err(|err| PayloadEncodeError::SerializeFailed(err.to_string()))?
+        .into_vec();
+
+    payload_len_from_archived_len(bytes.len()).map_err(|err| match err {
+        PayloadLenError::TooLarge { len, max } => PayloadEncodeError::PayloadTooLarge { len, max },
+    })?;
+
+    Ok(bytes)
+}
+
+fn decode_rkyv_payload<T>(bytes: &[u8]) -> Result<T, PayloadDecodeError>
+where
+    T: Archive,
+    for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
+    if bytes.is_empty() {
+        return Err(PayloadDecodeError::Empty);
+    }
+
+    let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
+    aligned.extend_from_slice(bytes);
+
+    rkyv::from_bytes::<T, RkyvError>(&aligned)
         .map_err(|err| PayloadDecodeError::DeserializeFailed(err.to_string()))
 }
 
@@ -505,11 +744,6 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(FrameHeader, &[u8]), FrameDecodeErr
     Ok((header, payload))
 }
 
-/// Validate that an encoded common payload can be advertised in `HandshakeInfo`.
-pub fn payload_len_for_handshake(payload: &[u8]) -> Result<u16, PayloadLenError> {
-    payload_len_from_archived_len(payload.len())
-}
-
 /// 根据完整 rkyv snapshot payload 字节长度计算握手中的固定 payload 长度。
 pub fn payload_len_from_archived_len(archived_len: usize) -> Result<u16, PayloadLenError> {
     if archived_len > MAX_PAYLOAD_LEN {
@@ -530,15 +764,15 @@ pub fn archived_len_from_payload_len(payload_len: u16) -> Option<usize> {
 /// Deprecated compatibility helper from the timestamp-prefix draft.
 #[deprecated(
     since = "0.1.0",
-    note = "Current payload is complete ServerGpuSnapshot rkyv bytes; use encode_snapshot_payload"
+    note = "Current payload is complete ServerGresSnapshot rkyv bytes; use encode_snapshot_payload"
 )]
 pub fn encode_payload(
     timestamp_ms: i64,
-    archived_server_gpus: &[u8],
+    archived_server_gres: &[u8],
 ) -> Result<Vec<u8>, PayloadLenError> {
     #[allow(deprecated)]
     let payload_len = PAYLOAD_TIMESTAMP_LEN
-        .checked_add(archived_server_gpus.len())
+        .checked_add(archived_server_gres.len())
         .ok_or(PayloadLenError::TooLarge {
             len: usize::MAX,
             max: MAX_PAYLOAD_LEN,
@@ -552,14 +786,14 @@ pub fn encode_payload(
 
     let mut out = Vec::with_capacity(payload_len);
     out.extend_from_slice(&timestamp_ms.to_be_bytes());
-    out.extend_from_slice(archived_server_gpus);
+    out.extend_from_slice(archived_server_gres);
     Ok(out)
 }
 
 /// Deprecated compatibility helper from the timestamp-prefix draft.
 #[deprecated(
     since = "0.1.0",
-    note = "Current payload is complete ServerGpuSnapshot rkyv bytes; use decode_snapshot_payload"
+    note = "Current payload is complete ServerGresSnapshot rkyv bytes; use decode_snapshot_payload"
 )]
 pub fn decode_payload(payload: &[u8]) -> Option<(i64, &[u8])> {
     #[allow(deprecated)]
@@ -580,17 +814,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn payload_len_is_u16_type_level_constraint() {
-        let info = HandshakeInfo {
-            version: PROTOCOL_VERSION,
-            hostname: "node-a".to_string(),
-            gpu_num: 8,
-            payload_len: u16::MAX,
-        };
-        assert_eq!(info.payload_len, 65_535);
-    }
-
-    #[test]
     fn payload_len_matches_complete_snapshot_archive_len() {
         assert_eq!(payload_len_from_archived_len(0), Ok(0));
         assert_eq!(payload_len_from_archived_len(4), Ok(4));
@@ -599,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_len_rejects_values_that_do_not_fit_handshake() {
+    fn payload_len_rejects_values_that_do_not_fit_u16() {
         let err = payload_len_from_archived_len(MAX_PAYLOAD_LEN + 1).unwrap_err();
         assert_eq!(
             err,
@@ -617,19 +840,51 @@ mod tests {
         let decoded = decode_snapshot_payload(&payload).expect("decode");
 
         assert_eq!(decoded, snapshot);
-        assert_eq!(decoded.gpus[0].processes[0].uid, 1000);
+        assert_eq!(decoded.gres[0].processes[0].uid, 1000);
         assert_eq!(
-            decoded.gpus[0].processes[0].command.as_deref(),
+            decoded.gres[0].processes[0].command.as_deref(),
             Some("python train.py")
         );
     }
 
     #[test]
-    fn snapshot_payload_roundtrip_allows_empty_gpu_list() {
-        let snapshot = ServerGpuSnapshot {
+    fn metadata_and_runtime_payloads_rebuild_snapshot_without_command() {
+        let snapshot = sample_snapshot();
+        let metadata = HostMetadata::from_snapshot(&snapshot);
+        let runtime = RuntimeSnapshot::from_snapshot(&snapshot);
+
+        let metadata_payload = encode_metadata_payload(&metadata).expect("metadata payload");
+        let runtime_payload = encode_runtime_payload(&runtime).expect("runtime payload");
+        let decoded_metadata =
+            decode_metadata_payload(&metadata_payload).expect("decode metadata payload");
+        let decoded_runtime =
+            decode_runtime_payload(&runtime_payload).expect("decode runtime payload");
+        let rebuilt = decoded_runtime.to_snapshot(&decoded_metadata);
+
+        assert_eq!(rebuilt.hostname, snapshot.hostname);
+        assert_eq!(rebuilt.driver_version, snapshot.driver_version);
+        assert_eq!(rebuilt.gres[0].name, snapshot.gres[0].name);
+        assert_eq!(
+            rebuilt.gres[0].memory.total_mb,
+            snapshot.gres[0].memory.total_mb
+        );
+        assert_eq!(
+            rebuilt.gres[0].memory.used_mb,
+            snapshot.gres[0].memory.used_mb
+        );
+        assert_eq!(
+            rebuilt.gres[0].processes[0].uid,
+            snapshot.gres[0].processes[0].uid
+        );
+        assert_eq!(rebuilt.gres[0].processes[0].command, None);
+    }
+
+    #[test]
+    fn snapshot_payload_roundtrip_allows_empty_gres_list() {
+        let snapshot = ServerGresSnapshot {
             hostname: "empty-node".to_string(),
             driver_version: None,
-            gpus: Vec::new(),
+            gres: Vec::new(),
         };
 
         let payload = encode_snapshot_payload(&snapshot).expect("encode");
@@ -639,32 +894,32 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_payload_roundtrip_preserves_multi_gpu_multi_process_shape() {
-        let snapshot = ServerGpuSnapshot {
-            hostname: "mock-node-02".to_string(),
+    fn snapshot_payload_roundtrip_preserves_multi_gres_multi_process_shape() {
+        let snapshot = ServerGresSnapshot {
+            hostname: "test-node-02".to_string(),
             driver_version: None,
-            gpus: vec![
-                GpuInfo {
+            gres: vec![
+                GresInfo {
                     index: 0,
                     name: "NVIDIA A100".to_string(),
                     temperature_c: None,
-                    uuid: Some("GPU-mock-0000".to_string()),
-                    memory: GpuMemory {
+                    uuid: Some("GRES-TEST-0000".to_string()),
+                    memory: GresMemory {
                         used_mb: 1_234,
                         total_mb: 16_384,
                     },
-                    utilization: GpuUtilization {
-                        gpu_percent: 87,
+                    utilization: GresUtilization {
+                        gres_percent: 87,
                         memory_percent: 42,
                     },
                     processes: vec![
-                        GpuProcessInfo {
+                        GresProcessInfo {
                             pid: 1001,
                             uid: 1001,
                             command: Some("python train.py".to_string()),
                             used_memory_mb: 512,
                         },
-                        GpuProcessInfo {
+                        GresProcessInfo {
                             pid: 1002,
                             uid: 1002,
                             command: Some("python eval.py".to_string()),
@@ -672,17 +927,17 @@ mod tests {
                         },
                     ],
                 },
-                GpuInfo {
+                GresInfo {
                     index: 1,
                     name: "NVIDIA A100".to_string(),
                     temperature_c: None,
-                    uuid: Some("GPU-mock-0001".to_string()),
-                    memory: GpuMemory {
+                    uuid: Some("GRES-TEST-0001".to_string()),
+                    memory: GresMemory {
                         used_mb: 2_048,
                         total_mb: 16_384,
                     },
-                    utilization: GpuUtilization {
-                        gpu_percent: 12,
+                    utilization: GresUtilization {
+                        gres_percent: 12,
                         memory_percent: 8,
                     },
                     processes: Vec::new(),
@@ -693,15 +948,15 @@ mod tests {
         let payload = encode_snapshot_payload(&snapshot).expect("encode");
         let decoded = decode_snapshot_payload(&payload).expect("decode");
 
-        assert_eq!(decoded.hostname, "mock-node-02");
-        assert_eq!(decoded.gpus.len(), 2);
-        assert_eq!(decoded.gpus[0].index, 0);
-        assert_eq!(decoded.gpus[1].index, 1);
-        assert_eq!(decoded.gpus[0].uuid.as_deref(), Some("GPU-mock-0000"));
-        assert_eq!(decoded.gpus[1].uuid.as_deref(), Some("GPU-mock-0001"));
-        assert_eq!(decoded.gpus[0].processes.len(), 2);
-        assert_eq!(decoded.gpus[0].processes[0].uid, 1001);
-        assert_eq!(decoded.gpus[0].processes[1].pid, 1002);
+        assert_eq!(decoded.hostname, "test-node-02");
+        assert_eq!(decoded.gres.len(), 2);
+        assert_eq!(decoded.gres[0].index, 0);
+        assert_eq!(decoded.gres[1].index, 1);
+        assert_eq!(decoded.gres[0].uuid.as_deref(), Some("GRES-TEST-0000"));
+        assert_eq!(decoded.gres[1].uuid.as_deref(), Some("GRES-TEST-0001"));
+        assert_eq!(decoded.gres[0].processes.len(), 2);
+        assert_eq!(decoded.gres[0].processes[0].uid, 1001);
+        assert_eq!(decoded.gres[0].processes[1].pid, 1002);
         assert_eq!(decoded, snapshot);
     }
 
@@ -711,21 +966,21 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_payload_encode_rejects_handshake_u16_overflow() {
-        let snapshot = ServerGpuSnapshot {
+    fn snapshot_payload_encode_rejects_u16_overflow() {
+        let snapshot = ServerGresSnapshot {
             hostname: "oversized-node".to_string(),
             driver_version: None,
-            gpus: vec![GpuInfo {
+            gres: vec![GresInfo {
                 index: 0,
                 name: "x".repeat(MAX_PAYLOAD_LEN + 1),
                 temperature_c: None,
                 uuid: None,
-                memory: GpuMemory {
+                memory: GresMemory {
                     used_mb: 0,
                     total_mb: 0,
                 },
-                utilization: GpuUtilization {
-                    gpu_percent: 0,
+                utilization: GresUtilization {
+                    gres_percent: 0,
                     memory_percent: 0,
                 },
                 processes: Vec::new(),
@@ -744,7 +999,7 @@ mod tests {
 
     #[test]
     fn frame_header_roundtrip() {
-        let header = FrameHeader::new(FrameType::DataPayload, 42, 4096);
+        let header = FrameHeader::new(FrameType::RuntimePayload, 42, 4096);
         let encoded = header.encode();
         assert_eq!(&encoded[0..4], &FRAME_MAGIC);
         assert_eq!(FrameHeader::decode(&encoded), Ok(header));
@@ -778,18 +1033,18 @@ mod tests {
     #[test]
     fn complete_frame_roundtrip_allows_large_transport_payload() {
         let payload = vec![0xabu8; MAX_PAYLOAD_LEN + 512];
-        let frame = encode_frame(FrameHeader::new(FrameType::DataPayload, 5, 0), &payload);
+        let frame = encode_frame(FrameHeader::new(FrameType::RuntimePayload, 5, 0), &payload);
         let (decoded_header, decoded_payload) = decode_frame(&frame).expect("decode frame");
 
-        assert_eq!(decoded_header.frame_type, FrameType::DataPayload);
+        assert_eq!(decoded_header.frame_type, FrameType::RuntimePayload);
         assert_eq!(decoded_header.payload_len, payload.len() as u32);
         assert_eq!(decoded_payload, payload);
-        assert!(payload_len_for_handshake(decoded_payload).is_err());
+        assert!(payload_len_from_archived_len(decoded_payload.len()).is_err());
     }
 
     #[test]
     fn complete_frame_rejects_payload_length_mismatch() {
-        let header = FrameHeader::new(FrameType::DataPayload, 7, 10);
+        let header = FrameHeader::new(FrameType::RuntimePayload, 7, 10);
         let mut frame = Vec::from(header.encode());
         frame.extend_from_slice(b"short");
 
@@ -879,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    fn kcp_handshake_query_data_sequence_encodes_and_decodes() {
+    fn binary_handshake_query_runtime_sequence_encodes_and_decodes() {
         let request_id = 99;
 
         let handshake_request = HandshakeRequest::current();
@@ -897,26 +1152,17 @@ mod tests {
         assert_eq!(decoded_request.validate(), Ok(()));
 
         let snapshot = sample_snapshot();
-        let data_payload = encode_snapshot_payload(&snapshot).expect("encode snapshot");
-        let handshake_payload_len =
-            payload_len_for_handshake(&data_payload).expect("payload fits handshake");
-        let handshake_info = HandshakeInfo::new(
-            snapshot.hostname.clone(),
-            snapshot.gpus.len() as u8,
-            handshake_payload_len,
+        let metadata = HostMetadata::from_snapshot(&snapshot);
+        let metadata_payload = encode_metadata_payload(&metadata).expect("encode metadata");
+        let metadata_frame = encode_frame(
+            FrameHeader::new(FrameType::MetadataPayload, 0, 0),
+            &metadata_payload,
         );
-        let handshake_info_payload =
-            serde_json::to_vec(&handshake_info).expect("encode handshake info json");
-        let handshake_info_frame = encode_frame(
-            FrameHeader::new(FrameType::HandshakeInfo, 0, 0),
-            &handshake_info_payload,
-        );
-        let (header, payload) = decode_frame(&handshake_info_frame).expect("decode handshake info");
-        assert_eq!(header.frame_type, FrameType::HandshakeInfo);
-        let decoded_info: HandshakeInfo =
-            serde_json::from_slice(payload).expect("decode handshake info payload");
-        assert_eq!(decoded_info.validate(), Ok(()));
-        assert_eq!(decoded_info.payload_len, data_payload.len() as u16);
+        let (header, payload) = decode_frame(&metadata_frame).expect("decode metadata frame");
+        assert_eq!(header.frame_type, FrameType::MetadataPayload);
+        let decoded_metadata = decode_metadata_payload(payload).expect("decode metadata payload");
+        assert_eq!(decoded_metadata.hostname, snapshot.hostname);
+        assert_eq!(decoded_metadata.gres.len(), snapshot.gres.len());
 
         let query = QueryRequest {
             version: PROTOCOL_VERSION,
@@ -934,25 +1180,38 @@ mod tests {
             serde_json::from_slice(payload).expect("decode query payload");
         assert_eq!(decoded_query, query);
 
-        let data_frame = encode_frame(
-            FrameHeader::new(FrameType::DataPayload, request_id, 0),
-            &data_payload,
+        let runtime = RuntimeSnapshot::from_snapshot(&snapshot);
+        let runtime_payload = encode_runtime_payload(&runtime).expect("encode runtime");
+        let runtime_frame = encode_frame(
+            FrameHeader::new(FrameType::RuntimePayload, request_id, 0),
+            &runtime_payload,
         );
-        let (header, payload) = decode_frame(&data_frame).expect("decode data");
-        assert_eq!(header.frame_type, FrameType::DataPayload);
+        let (header, payload) = decode_frame(&runtime_frame).expect("decode runtime frame");
+        assert_eq!(header.frame_type, FrameType::RuntimePayload);
         assert_eq!(header.request_id, request_id);
-        assert_eq!(header.payload_len, handshake_payload_len as u32);
-        let decoded_snapshot = decode_snapshot_payload(payload).expect("decode snapshot payload");
-        assert_eq!(decoded_snapshot, snapshot);
+        assert_eq!(header.payload_len, runtime_payload.len() as u32);
+        let decoded_runtime = decode_runtime_payload(payload).expect("decode runtime payload");
+        assert_eq!(
+            decoded_runtime.to_snapshot(&decoded_metadata),
+            runtime.to_snapshot(&metadata)
+        );
     }
 
     #[test]
-    fn stable_gpu_model_json_bootstrap_roundtrip() {
+    fn stable_gres_model_json_bootstrap_roundtrip() {
         let snapshot = sample_snapshot();
 
         let encoded = serde_json::to_vec(&snapshot).expect("serialize");
-        let decoded: ServerGpuSnapshot = serde_json::from_slice(&encoded).expect("deserialize");
+        let decoded: ServerGresSnapshot = serde_json::from_slice(&encoded).expect("deserialize");
         assert_eq!(decoded, snapshot);
+    }
+
+    #[test]
+    fn stable_gres_model_serializes_gres_field_not_legacy_gpus() {
+        let value = serde_json::to_value(sample_snapshot()).expect("serialize");
+        assert!(value.get("gres").is_some());
+        assert!(value.get("gpus").is_none());
+        assert_eq!(value["gres"][0]["utilization"]["gres_percent"], 75);
     }
 
     #[test]
@@ -974,7 +1233,6 @@ mod tests {
         assert_eq!(msg.ttl, None);
         assert_eq!(msg.load, None);
         assert_eq!(msg.degraded, None);
-        assert_eq!(msg.kcp_port, None);
         assert_eq!(msg.tcp_port, None);
     }
 
@@ -1002,24 +1260,24 @@ mod tests {
         );
     }
 
-    fn sample_snapshot() -> ServerGpuSnapshot {
-        ServerGpuSnapshot {
+    fn sample_snapshot() -> ServerGresSnapshot {
+        ServerGresSnapshot {
             hostname: "node-a".to_string(),
             driver_version: None,
-            gpus: vec![GpuInfo {
+            gres: vec![GresInfo {
                 index: 0,
                 name: "NVIDIA A100".to_string(),
                 temperature_c: None,
-                uuid: Some("GPU-123".to_string()),
-                memory: GpuMemory {
+                uuid: Some("GRES-123".to_string()),
+                memory: GresMemory {
                     used_mb: 1024,
                     total_mb: 81920,
                 },
-                utilization: GpuUtilization {
-                    gpu_percent: 75,
+                utilization: GresUtilization {
+                    gres_percent: 75,
                     memory_percent: 20,
                 },
-                processes: vec![GpuProcessInfo {
+                processes: vec![GresProcessInfo {
                     pid: 1234,
                     uid: 1000,
                     command: Some("python train.py".to_string()),

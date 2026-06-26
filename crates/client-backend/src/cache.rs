@@ -4,9 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-#[cfg(feature = "kcp-transport")]
-use common::HandshakeInfo;
-use common::ServerGpuSnapshot;
+use common::ServerGresSnapshot;
 
 use crate::discovery::DiscoveredNode;
 
@@ -18,54 +16,12 @@ pub struct ConnectionCacheEntry {
     pub connection_id: String,
     pub hostname: String,
     pub num: u8,
-    pub server_gpus: Vec<u8>,
+    pub server_gres: Vec<u8>,
     pub record_timestamp: i64,
     pub addr: SocketAddr,
-    pub last_snapshot: Option<ServerGpuSnapshot>,
+    pub last_snapshot: Option<ServerGresSnapshot>,
     pub last_error: Option<String>,
     pub last_query_latency_us: Option<u64>,
-}
-
-#[cfg(feature = "kcp-transport")]
-#[derive(Debug, Clone)]
-pub struct KcpConnectionCacheEntry {
-    // Retained with the session entry for diagnostics and reconnect bookkeeping.
-    #[allow(dead_code)]
-    pub connection_id: String,
-    #[allow(dead_code)]
-    pub hostname: String,
-    #[allow(dead_code)]
-    pub addr: SocketAddr,
-    pub gpu_num: u8,
-    #[allow(dead_code)]
-    pub payload_len: u16,
-    pub last_snapshot: Option<ServerGpuSnapshot>,
-    pub record_timestamp: i64,
-}
-
-#[cfg(feature = "kcp-transport")]
-impl KcpConnectionCacheEntry {
-    pub fn from_handshake(
-        connection_id: impl Into<String>,
-        addr: SocketAddr,
-        info: &common::HandshakeInfo,
-    ) -> Self {
-        Self {
-            connection_id: connection_id.into(),
-            hostname: info.hostname.clone(),
-            addr,
-            gpu_num: info.gpu_num,
-            payload_len: info.payload_len,
-            last_snapshot: None,
-            record_timestamp: 0,
-        }
-    }
-
-    pub fn update_snapshot(&mut self, snapshot: ServerGpuSnapshot) {
-        self.gpu_num = snapshot.gpus.len().min(u8::MAX as usize) as u8;
-        self.record_timestamp = now_ms();
-        self.last_snapshot = Some(snapshot);
-    }
 }
 
 impl ConnectionCacheEntry {
@@ -73,18 +29,17 @@ impl ConnectionCacheEntry {
         filter.matches_target(&self.hostname, self.addr, &self.connection_id)
     }
 
-    #[cfg_attr(not(feature = "kcp-transport"), allow(dead_code))]
     pub fn from_snapshot(
         connection_id: impl Into<String>,
         addr: SocketAddr,
-        snapshot: ServerGpuSnapshot,
+        snapshot: ServerGresSnapshot,
         last_query_latency_us: Option<u64>,
     ) -> Self {
         Self {
             connection_id: connection_id.into(),
             hostname: snapshot.hostname.clone(),
-            num: snapshot.gpus.len().min(u8::MAX as usize) as u8,
-            server_gpus: Vec::new(),
+            num: snapshot.gres.len().min(u8::MAX as usize) as u8,
+            server_gres: Vec::new(),
             // Cache freshness must be measured on the client-backend host.
             // Server timestamps are preserved inside `last_snapshot` for display, but
             // cluster clocks can drift enough to otherwise delay refreshes by seconds.
@@ -109,7 +64,7 @@ pub fn build_cache(discovered: Vec<DiscoveredNode>) -> CacheMap {
                     connection_id: format!("conn-{:03}", idx + 1),
                     hostname: n.hostname,
                     num: 0,
-                    server_gpus: Vec::new(),
+                    server_gres: Vec::new(),
                     record_timestamp: n.ts_ms,
                     addr: n.addr,
                     last_snapshot: None,
@@ -121,14 +76,11 @@ pub fn build_cache(discovered: Vec<DiscoveredNode>) -> CacheMap {
         .collect()
 }
 
-// Shared by transport code and local API tests so snapshot-backed cache entries
-// stay covered even when KCP support is not compiled into the binary.
-#[cfg_attr(not(feature = "kcp-transport"), allow(dead_code))]
 pub fn upsert_snapshot(
     rows: &mut CacheMap,
     connection_id: impl Into<String>,
     addr: SocketAddr,
-    snapshot: ServerGpuSnapshot,
+    snapshot: ServerGresSnapshot,
     last_query_latency_us: Option<u64>,
 ) {
     rows.insert(
@@ -137,31 +89,6 @@ pub fn upsert_snapshot(
     );
 }
 
-#[cfg(feature = "kcp-transport")]
-pub fn upsert_handshake(
-    rows: &mut CacheMap,
-    connection_id: impl Into<String>,
-    addr: SocketAddr,
-    info: &HandshakeInfo,
-) {
-    let key = format!("{}-{}", addr.ip(), addr.port());
-    rows.insert(
-        key,
-        ConnectionCacheEntry {
-            connection_id: connection_id.into(),
-            hostname: info.hostname.clone(),
-            num: info.gpu_num,
-            server_gpus: Vec::new(),
-            record_timestamp: now_ms(),
-            addr,
-            last_snapshot: None,
-            last_error: None,
-            last_query_latency_us: None,
-        },
-    );
-}
-
-#[cfg_attr(not(feature = "kcp-transport"), allow(dead_code))]
 pub fn mark_stale(
     rows: &mut CacheMap,
     connection_id: impl Into<String>,
@@ -175,7 +102,7 @@ pub fn mark_stale(
             connection_id: connection_id.into(),
             hostname: hostname.into(),
             num: 0,
-            server_gpus: Vec::new(),
+            server_gres: Vec::new(),
             record_timestamp: now_ms(),
             addr,
             last_snapshot: None,
@@ -195,51 +122,9 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "kcp-transport")]
-    use common::HandshakeInfo;
-    use common::{GpuInfo, GpuMemory, GpuUtilization, ServerGpuSnapshot};
-
-    #[cfg(feature = "kcp-transport")]
+    use common::{GresInfo, GresMemory, GresUtilization, ServerGresSnapshot};
     #[test]
-    fn kcp_cache_entry_can_seed_from_handshake_and_update_snapshot() {
-        let info = HandshakeInfo::new("node-a", 2, 4096);
-        let addr = "10.0.0.1:30000".parse().unwrap();
-        let mut entry = KcpConnectionCacheEntry::from_handshake("conn-001", addr, &info);
-
-        assert_eq!(entry.hostname, "node-a");
-        assert_eq!(entry.connection_id, "conn-001");
-        assert_eq!(entry.addr, addr);
-        assert_eq!(entry.gpu_num, 2);
-        assert_eq!(entry.payload_len, 4096);
-        assert!(entry.last_snapshot.is_none());
-
-        entry.update_snapshot(ServerGpuSnapshot {
-            hostname: "node-a".to_string(),
-            driver_version: None,
-            gpus: vec![GpuInfo {
-                index: 0,
-                name: "NVIDIA A100".to_string(),
-                temperature_c: None,
-                uuid: None,
-                memory: GpuMemory {
-                    used_mb: 1,
-                    total_mb: 2,
-                },
-                utilization: GpuUtilization {
-                    gpu_percent: 3,
-                    memory_percent: 4,
-                },
-                processes: Vec::new(),
-            }],
-        });
-
-        assert_eq!(entry.gpu_num, 1);
-        assert!(entry.record_timestamp > 0);
-        assert!(entry.last_snapshot.is_some());
-    }
-
-    #[test]
-    fn upsert_snapshot_adds_kcp_result_to_cache() {
+    fn upsert_snapshot_adds_result_to_cache() {
         let mut rows = CacheMap::new();
         let addr = "127.0.0.1:30000".parse().unwrap();
 
@@ -248,20 +133,20 @@ mod tests {
             &mut rows,
             "conn-001",
             addr,
-            ServerGpuSnapshot {
-                hostname: "kcp-node".to_string(),
+            ServerGresSnapshot {
+                hostname: "test-node".to_string(),
                 driver_version: None,
-                gpus: vec![GpuInfo {
+                gres: vec![GresInfo {
                     index: 0,
                     name: "NVIDIA A100".to_string(),
                     temperature_c: None,
                     uuid: None,
-                    memory: GpuMemory {
+                    memory: GresMemory {
                         used_mb: 1024,
                         total_mb: 81920,
                     },
-                    utilization: GpuUtilization {
-                        gpu_percent: 66,
+                    utilization: GresUtilization {
+                        gres_percent: 66,
                         memory_percent: 10,
                     },
                     processes: Vec::new(),
@@ -271,7 +156,7 @@ mod tests {
         );
 
         let entry = rows.get("127.0.0.1-30000").expect("cache entry");
-        assert_eq!(entry.hostname, "kcp-node");
+        assert_eq!(entry.hostname, "test-node");
         assert_eq!(entry.num, 1);
         assert!(entry.record_timestamp >= before);
         assert!(entry.last_snapshot.is_some());

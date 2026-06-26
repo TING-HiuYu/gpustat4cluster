@@ -20,12 +20,11 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
-use cache::GpuCache;
+use cache::GresCache;
 use chrono::Local;
-#[cfg(feature = "mock-nvml")]
-use collector::MockNvmlCollector;
-use collector::{mock_nvml_requested_from_env, GpuCollector, NvmlCollector};
+use collector::{GresCollector, NvmlCollector};
 use common::{Config, DiscoveryAnnounce, DiscoveryQuery, ErrorCode, PROTOCOL_VERSION};
+use model::SnapshotSummary;
 use serde_json::json;
 use serde_json::Value;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -121,7 +120,7 @@ fn run() -> Result<(), StartupError> {
 
     let (collector, degraded, collector_mode) = build_collector(&hostname, &config)?;
 
-    let cache = Arc::new(GpuCache::new());
+    let cache = Arc::new(GresCache::new());
     let ttl_ms = config.services.cache_ttl_ms;
     let collector_interval_ms = config.services.collector_interval_ms;
     let _query_addr =
@@ -188,24 +187,12 @@ fn run() -> Result<(), StartupError> {
 fn build_collector(
     hostname: &str,
     config: &Config,
-) -> Result<(Arc<dyn GpuCollector>, bool, &'static str), StartupError> {
-    #[cfg(feature = "mock-nvml")]
-    if mock_nvml_requested_from_env() {
-        return Ok((
-            Arc::new(MockNvmlCollector::from_env(hostname.to_string())) as Arc<dyn GpuCollector>,
-            false,
-            "mock-nvml",
-        ));
-    }
-
-    #[cfg(not(feature = "mock-nvml"))]
-    let _mock_requested_but_not_enabled = mock_nvml_requested_from_env();
-
+) -> Result<(Arc<dyn GresCollector>, bool, &'static str), StartupError> {
     NvmlCollector::new(
         hostname.to_string(),
         config.runtime.nvml_lib_path.as_deref(),
     )
-    .map(|c| (Arc::new(c) as Arc<dyn GpuCollector>, false, "nvml"))
+    .map(|c| (Arc::new(c) as Arc<dyn GresCollector>, false, "nvml"))
     .map_err(|code| {
         StartupError::new(
             code,
@@ -506,8 +493,8 @@ fn start_runtime_loops(
     tcp_port: u16,
     multicast: SocketAddr,
     hostname: String,
-    collector: Arc<dyn GpuCollector>,
-    cache: Arc<GpuCache>,
+    collector: Arc<dyn GresCollector>,
+    cache: Arc<GresCache>,
     ttl_ms: u64,
     collector_interval_ms: u64,
     multicast_retry_limit: u32,
@@ -597,8 +584,8 @@ fn start_runtime_loops(
 }
 
 fn background_refresh_loop(
-    collector: Arc<dyn GpuCollector>,
-    cache: Arc<GpuCache>,
+    collector: Arc<dyn GresCollector>,
+    cache: Arc<GresCache>,
     ttl_ms: u64,
     collector_interval_ms: u64,
 ) {
@@ -633,8 +620,8 @@ fn kcp_enabled_from_config(_config: &Config) -> bool {
 fn maybe_spawn_kcp_server(
     kcp_enabled: bool,
     bind_port: u16,
-    collector: Arc<dyn GpuCollector>,
-    cache: Arc<GpuCache>,
+    collector: Arc<dyn GresCollector>,
+    cache: Arc<GresCache>,
     ttl_ms: u64,
     connection_idle_timeout_secs: u64,
     max_connections: usize,
@@ -697,6 +684,7 @@ fn discovery_announce(hostname: &str, ip: &str, kcp_port: u16, tcp_port: u16) ->
         port: kcp_port,
         kcp_port: Some(kcp_port),
         tcp_port: Some(tcp_port),
+        udp_port: None,
         ttl: None,
         load: None,
         degraded: Some(false),
@@ -866,8 +854,8 @@ fn multicast_route_hint(message: String, error: &std::io::Error) -> String {
 
 fn query_server_loop(
     listen_addr: &str,
-    collector: Arc<dyn GpuCollector>,
-    cache: Arc<GpuCache>,
+    collector: Arc<dyn GresCollector>,
+    cache: Arc<GresCache>,
     ttl_ms: u64,
     connection_idle_timeout: Duration,
 ) {
@@ -902,8 +890,8 @@ fn query_server_loop(
 
 fn handle_query_stream(
     stream: &mut TcpStream,
-    collector: &Arc<dyn GpuCollector>,
-    cache: &Arc<GpuCache>,
+    collector: &Arc<dyn GresCollector>,
+    cache: &Arc<GresCache>,
     ttl_ms: u64,
 ) {
     let mut buf = [0u8; 16];
@@ -915,8 +903,9 @@ fn handle_query_stream(
             let body = json!({
                 "ok": true,
                 "timestamp_ms": entry.timestamp_ms,
-                "gpu_num": entry.gpu_num(),
-                "avg_utilization": entry.avg_utilization(),
+                "gpu_num": entry.snapshot.gpu_num(),
+                "gres_num": entry.snapshot.gres_num(),
+                "avg_utilization": entry.snapshot.avg_utilization(),
                 "payload_len": entry.payload.len(),
                 "payload_b64": BASE64_STANDARD.encode(entry.payload.as_slice()),
                 "metrics": {
