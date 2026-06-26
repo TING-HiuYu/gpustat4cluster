@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn wildcard_filter_matches_hostname_suffix_and_ip() {
         let filter = NodeFilter::parse(Some("*.cluster,10.1.*"));
-        assert!(filter.matches_target("gpu-a.cluster", addr("192.168.1.1:30000"), "conn-001"));
+        assert!(filter.matches_target("gres-a.cluster", addr("192.168.1.1:30000"), "conn-001"));
         assert!(filter.matches_target("cpu-a", addr("10.1.2.3:30000"), "conn-002"));
         assert!(!filter.matches_target("cpu-a", addr("10.2.2.3:30000"), "conn-003"));
     }
