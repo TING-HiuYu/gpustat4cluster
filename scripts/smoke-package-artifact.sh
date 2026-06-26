@@ -29,22 +29,6 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
 }
 
-cargo_retry() {
-  local attempt=1
-  local max_attempts="${CARGO_BUILD_RETRY_LIMIT:-3}"
-  while true; do
-    if cargo "$@"; then
-      return 0
-    fi
-    if (( attempt >= max_attempts )); then
-      return 1
-    fi
-    log "cargo $* failed; retrying ($attempt/$max_attempts)"
-    sleep $(( attempt * 3 ))
-    attempt=$(( attempt + 1 ))
-  done
-}
-
 load_rust_module_if_needed() {
   if command -v cargo >/dev/null 2>&1; then
     return 0

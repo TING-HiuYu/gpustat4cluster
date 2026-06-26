@@ -20,11 +20,6 @@ on:
 permissions:
   contents: write
 
-env:
-  CARGO_HTTP_MULTIPLEXING: "false"
-  CARGO_NET_RETRY: "10"
-  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
-
 jobs:
   validate:
     name: validate release target
