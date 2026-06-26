@@ -61,9 +61,9 @@ build_release_binaries() {
   log "building native release server/client binaries"
   (
     cd "$ROOT_DIR"
-    cargo_retry build --locked --release -p server --features nvml
-    cargo_retry build --locked --release -p gpustat4cluster-client-backend
-    cargo_retry build --locked --release -p gpustat4cluster-client-cli
+    cargo build --locked --release -p server --features nvml
+    cargo build --locked --release -p gpustat4cluster-client-backend
+    cargo build --locked --release -p gpustat4cluster-client-cli
   )
 
   if [[ "$MULTIARCH" == "1" ]]; then
@@ -79,9 +79,9 @@ build_release_binaries() {
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-rust-lld}"
           ;;
       esac
-      cargo_retry build --locked --release --target "$ARM64_TARGET" -p server --features nvml
-      cargo_retry build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-backend
-      cargo_retry build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-cli
+      cargo build --locked --release --target "$ARM64_TARGET" -p server --features nvml
+      cargo build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-backend
+      cargo build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-cli
     )
   fi
 }

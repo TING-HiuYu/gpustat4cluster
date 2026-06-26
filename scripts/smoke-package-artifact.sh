@@ -61,9 +61,9 @@ build_release_binaries() {
   log "building release binaries"
   (
     cd "$ROOT_DIR"
-    cargo_retry build --locked --release -p server --features nvml
-    cargo_retry build --locked --release -p gpustat4cluster-client-backend
-    cargo_retry build --locked --release -p gpustat4cluster-client-cli
+    cargo build --locked --release -p server --features nvml
+    cargo build --locked --release -p gpustat4cluster-client-backend
+    cargo build --locked --release -p gpustat4cluster-client-cli
   )
 }
 
