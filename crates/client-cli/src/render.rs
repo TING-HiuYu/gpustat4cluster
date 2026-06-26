@@ -35,7 +35,7 @@ impl RenderOptions {
             show_cmd: opts.show_cmd,
             show_user: opts.show_user,
             show_pid: opts.show_pid,
-            gresname_width: opts.gpuname_width,
+            gresname_width: opts.gresname_width,
             latency_display: crate::backend::latency_display_from_options(opts),
         }
     }

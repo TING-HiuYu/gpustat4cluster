@@ -14,7 +14,7 @@ pub struct CliOptions {
     pub show_cmd: bool,
     pub show_user: bool,
     pub show_pid: bool,
-    pub gpuname_width: Option<usize>,
+    pub gresname_width: Option<usize>,
     pub latency_display: Option<bool>,
     pub backend_socket: Option<String>,
 }
@@ -34,7 +34,7 @@ impl Default for CliOptions {
             show_cmd: false,
             show_user: false,
             show_pid: false,
-            gpuname_width: None,
+            gresname_width: None,
             latency_display: None,
             backend_socket: None,
         }
@@ -114,7 +114,7 @@ pub fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
             "--gpuname-width" => {
                 i += 1;
                 let raw = required_value(&args, i, "--gpuname-width")?;
-                opts.gpuname_width = Some(raw.parse().map_err(|_| {
+                opts.gresname_width = Some(raw.parse().map_err(|_| {
                     format!(
                         "--gpuname-width must be a non-negative integer, got '{}'",
                         raw
