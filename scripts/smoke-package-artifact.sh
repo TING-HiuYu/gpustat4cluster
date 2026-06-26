@@ -58,11 +58,11 @@ build_release_binaries() {
   load_rust_module_if_needed
   require_cmd cargo
 
-  log "building release binaries with KCP transport support"
+  log "building release binaries"
   (
     cd "$ROOT_DIR"
-    cargo build --locked --release -p server --features "nvml kcp-transport"
-    cargo build --locked --release -p gpustat4cluster-client-backend --features kcp-transport
+    cargo build --locked --release -p server --features nvml
+    cargo build --locked --release -p gpustat4cluster-client-backend
     cargo build --locked --release -p gpustat4cluster-client-cli
   )
 }
@@ -129,16 +129,16 @@ check_role() {
   if [[ "$role" == "server" ]]; then
     assert_file "$extract_dir/etc/gpustat4cluster/server.toml"
     assert_file "$extract_dir/etc/gpustat4cluster/server.toml.example"
-    grep -q 'kcp_port = 0' "$extract_dir/etc/gpustat4cluster/server.toml" \
-      || fail "server config does not default kcp_port to auto"
+    grep -q 'udp_port = 0' "$extract_dir/etc/gpustat4cluster/server.toml" \
+      || fail "server config does not default udp_port to auto"
     grep -q 'tcp_port = 0' "$extract_dir/etc/gpustat4cluster/server.toml" \
       || fail "server config does not default tcp_port to auto"
     assert_executable "$extract_dir/usr/local/bin/gpustat4cluster-server"
   else
     assert_file "$extract_dir/etc/gpustat4cluster/client.toml"
     assert_file "$extract_dir/etc/gpustat4cluster/client.toml.example"
-    grep -q 'protocol = "kcp"' "$extract_dir/etc/gpustat4cluster/client.toml" \
-      || fail "client config does not default to KCP"
+    grep -q 'protocol = "udp"' "$extract_dir/etc/gpustat4cluster/client.toml" \
+      || fail "client config does not default to UDP"
     assert_executable "$extract_dir/usr/local/bin/gpustat4cluster-client-backend"
     assert_executable "$extract_dir/usr/local/bin/gpustat4cluster-client"
   fi

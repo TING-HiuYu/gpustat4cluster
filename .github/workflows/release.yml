@@ -253,7 +253,7 @@ jobs:
         run: |
           set -euxo pipefail
           for target in x86_64-apple-darwin aarch64-apple-darwin; do
-            cargo build --locked --release --target "$target" -p gpustat4cluster-client-backend --features kcp-transport
+            cargo build --locked --release --target "$target" -p gpustat4cluster-client-backend
             cargo build --locked --release --target "$target" -p gpustat4cluster-client-cli
           done
 
@@ -354,9 +354,9 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --workspace
-          cargo test -p server --features kcp-transport
-          cargo test -p gpustat4cluster-client-backend --features kcp-transport
-          cargo check -p server --features "kcp-transport nvml"
+          cargo test -p server
+          cargo test -p gpustat4cluster-client-backend
+          cargo check -p server --features nvml
 
       - name: Download built artifacts
         uses: actions/download-artifact@v4

@@ -58,11 +58,11 @@ build_release_binaries() {
   load_rust_module_if_needed
   require_cmd cargo
 
-  log "building native release server/client binaries with KCP transport"
+  log "building native release server/client binaries"
   (
     cd "$ROOT_DIR"
-    cargo build --locked --release -p server --features "nvml kcp-transport"
-    cargo build --locked --release -p gpustat4cluster-client-backend --features kcp-transport
+    cargo build --locked --release -p server --features nvml
+    cargo build --locked --release -p gpustat4cluster-client-backend
     cargo build --locked --release -p gpustat4cluster-client-cli
   )
 
@@ -79,8 +79,8 @@ build_release_binaries() {
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-rust-lld}"
           ;;
       esac
-      cargo build --locked --release --target "$ARM64_TARGET" -p server --features "nvml kcp-transport"
-      cargo build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-backend --features kcp-transport
+      cargo build --locked --release --target "$ARM64_TARGET" -p server --features nvml
+      cargo build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-backend
       cargo build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-cli
     )
   fi

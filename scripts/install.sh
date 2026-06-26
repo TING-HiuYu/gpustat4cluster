@@ -164,10 +164,8 @@ install_one_tar() {
 
 write_default_config() {
   local cfg="$ETC_DIR/config.toml"
-  local env_file="$ETC_DIR/gpustat4cluster.env"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[dry-run] init config: $cfg"
-    echo "[dry-run] init env example: $env_file"
     return 0
   fi
 
@@ -176,7 +174,7 @@ write_default_config() {
 [connecting]
 port_range = [30000, 40000]
 multicast_addr = "239.0.0.1:4000"
-protocol = "kcp" # or "tcp"
+protocol = "udp" # or "tcp"
 heartbeat_interval = 5
 connection_idle_timeout = 10
 max_connections = 64
@@ -198,30 +196,9 @@ cache_ttl_ms = 40
 EOF
   fi
 
-  if [[ ! -f "$env_file" ]]; then
-    as_root tee "$env_file" >/dev/null <<'EOF'
-# Optional gpustat4cluster runtime environment.
-# Release artifacts include KCP transport support, but KCP is disabled by default.
-#
-# Enable KCP transport for server and client-backend:
-# GPUSTAT4CLUSTER_ENABLE_KCP=1
-#
-# Client static nodes support a single node or comma-separated list:
-# GPUSTAT4CLUSTER_STATIC_NODES=127.0.0.1:30000
-#
-# Prefer UDS for CLI/frontend <-> client-backend communication:
-# GPUSTAT4CLUSTER_BACKEND_SOCKET=/tmp/gpustat4cluster.sock
-#
-# Test-only mock collector switches. Do not enable on production GPU nodes:
-# GPUSTAT4CLUSTER_COLLECTOR=mock
-# GPUSTAT4CLUSTER_FORCE_MOCK=1
-EOF
-  fi
-
   as_root chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$ETC_DIR"
   as_root chmod 0755 "$ETC_DIR"
   as_root chmod 0644 "$cfg"
-  as_root chmod 0644 "$env_file"
 }
 
 install_systemd() {

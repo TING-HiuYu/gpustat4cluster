@@ -54,10 +54,10 @@ build_release_binaries() {
   fi
   load_rust_module_if_needed
   require_cmd cargo
-  log "building native release client binaries with KCP transport"
+  log "building native release client binaries"
   (
     cd "$ROOT_DIR"
-    cargo build --locked --release -p gpustat4cluster-client-backend --features kcp-transport
+    cargo build --locked --release -p gpustat4cluster-client-backend
     cargo build --locked --release -p gpustat4cluster-client-cli
   )
 }
