@@ -1,14 +1,10 @@
-#![cfg_attr(not(feature = "kcp-transport"), allow(dead_code))]
-// Shared by KCP runtime code and unit tests. Fallback builds keep the protocol
-// helpers compiled while runtime callers remain feature-gated.
-
 use common::{
     protocol::{
-        decode_frame, decode_snapshot_payload, encode_frame, FrameDecodeError, FrameHeader,
-        FrameType,
+        decode_frame, decode_metadata_payload, decode_runtime_payload, encode_frame,
+        FrameDecodeError, FrameHeader, FrameType,
     },
-    ErrorCode, HandshakeInfo, HandshakeRequest, QueryRequest as WireQueryRequest,
-    QueryResponse as WireQueryResponse, ResponseStatus, ServerGpuSnapshot, PROTOCOL_VERSION,
+    ErrorCode, HandshakeRequest, HostMetadata, QueryRequest as WireQueryRequest,
+    QueryResponse as WireQueryResponse, ResponseStatus, RuntimeSnapshot, PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,15 +24,6 @@ pub fn build_handshake_request_frame(request_id: u64) -> Result<Vec<u8>, Transpo
     )
 }
 
-pub fn parse_handshake_info_frame(frame: &[u8]) -> Result<HandshakeInfo, TransportError> {
-    let (_, payload) = split_frame(frame, FrameType::HandshakeInfo)?;
-    let info: HandshakeInfo = serde_json::from_slice(payload)
-        .map_err(|e| TransportError::Json(format!("decode HandshakeInfo failed: {}", e)))?;
-    info.validate()
-        .map_err(|code| TransportError::QueryError(Some(code)))?;
-    Ok(info)
-}
-
 pub fn build_query_request_frame(request_id: u64) -> Result<Vec<u8>, TransportError> {
     encode_json_frame(
         FrameType::QueryRequest,
@@ -48,10 +35,6 @@ pub fn build_query_request_frame(request_id: u64) -> Result<Vec<u8>, TransportEr
     )
 }
 
-pub fn build_heartbeat_frame(request_id: u64) -> Result<Vec<u8>, TransportError> {
-    encode_bytes_frame(FrameType::Heartbeat, request_id, &[])
-}
-
 pub fn build_disconnect_frame(request_id: u64, reason: &str) -> Result<Vec<u8>, TransportError> {
     encode_bytes_frame(FrameType::Disconnect, request_id, reason.as_bytes())
 }
@@ -61,13 +44,18 @@ pub fn parse_disconnect_reason_frame(frame: &[u8]) -> Result<String, TransportEr
     Ok(String::from_utf8_lossy(payload).trim().to_string())
 }
 
-pub fn parse_data_payload_frame(frame: &[u8]) -> Result<ServerGpuSnapshot, TransportError> {
-    let (_, payload) = split_frame(frame, FrameType::DataPayload)?;
-    // Frame headers are 18 bytes, so payload slices may be unaligned for rkyv.
-    // Decode through the common helper to keep runtime and transport tests consistent.
+pub fn parse_metadata_payload_frame(frame: &[u8]) -> Result<HostMetadata, TransportError> {
+    let (_, payload) = split_frame(frame, FrameType::MetadataPayload)?;
     let aligned_payload = payload.to_vec();
-    decode_snapshot_payload(&aligned_payload)
-        .map_err(|e| TransportError::Payload(format!("decode snapshot payload failed: {:?}", e)))
+    decode_metadata_payload(&aligned_payload)
+        .map_err(|e| TransportError::Payload(format!("decode metadata payload failed: {:?}", e)))
+}
+
+pub fn parse_runtime_payload_frame(frame: &[u8]) -> Result<RuntimeSnapshot, TransportError> {
+    let (_, payload) = split_frame(frame, FrameType::RuntimePayload)?;
+    let aligned_payload = payload.to_vec();
+    decode_runtime_payload(&aligned_payload)
+        .map_err(|e| TransportError::Payload(format!("decode runtime payload failed: {:?}", e)))
 }
 
 pub fn parse_query_response_error_frame(frame: &[u8]) -> Result<Option<ErrorCode>, TransportError> {
@@ -88,11 +76,19 @@ pub fn parse_query_response_error_frame(frame: &[u8]) -> Result<Option<ErrorCode
 }
 
 #[cfg(test)]
-pub fn build_data_payload_frame(
+pub fn build_metadata_payload_frame(
     request_id: u64,
     payload: &[u8],
 ) -> Result<Vec<u8>, TransportError> {
-    encode_bytes_frame(FrameType::DataPayload, request_id, payload)
+    encode_bytes_frame(FrameType::MetadataPayload, request_id, payload)
+}
+
+#[cfg(test)]
+pub fn build_runtime_payload_frame(
+    request_id: u64,
+    payload: &[u8],
+) -> Result<Vec<u8>, TransportError> {
+    encode_bytes_frame(FrameType::RuntimePayload, request_id, payload)
 }
 
 #[cfg(test)]
@@ -144,27 +140,28 @@ fn split_frame(frame: &[u8], expected: FrameType) -> Result<(FrameHeader, &[u8])
 mod tests {
     use super::*;
     use common::{
-        protocol::encode_snapshot_payload, GpuInfo, GpuMemory, GpuProcessInfo, GpuUtilization,
+        encode_metadata_payload, encode_runtime_payload, GresInfo, GresMemory, GresProcessInfo,
+        GresUtilization, HostMetadata, RuntimeSnapshot, ServerGresSnapshot,
     };
 
-    fn snapshot() -> ServerGpuSnapshot {
-        ServerGpuSnapshot {
+    fn snapshot() -> ServerGresSnapshot {
+        ServerGresSnapshot {
             hostname: "node-a".to_string(),
             driver_version: None,
-            gpus: vec![GpuInfo {
+            gres: vec![GresInfo {
                 index: 0,
                 name: "NVIDIA A100".to_string(),
                 temperature_c: None,
                 uuid: None,
-                memory: GpuMemory {
+                memory: GresMemory {
                     used_mb: 1024,
                     total_mb: 81920,
                 },
-                utilization: GpuUtilization {
-                    gpu_percent: 88,
+                utilization: GresUtilization {
+                    gres_percent: 88,
                     memory_percent: 10,
                 },
-                processes: vec![GpuProcessInfo {
+                processes: vec![GresProcessInfo {
                     pid: 42,
                     uid: 1000,
                     command: Some("python".to_string()),
@@ -184,13 +181,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_handshake_info_frame() {
-        let info = HandshakeInfo::new("node-a", 2, 4096);
-        let frame = encode_json_frame(FrameType::HandshakeInfo, 9, &info).expect("frame");
-        let parsed = parse_handshake_info_frame(&frame).expect("parse handshake");
+    fn parses_metadata_payload_frame() {
+        let metadata = HostMetadata::from_snapshot(&snapshot());
+        let payload = encode_metadata_payload(&metadata).expect("metadata payload");
+        let frame = build_metadata_payload_frame(9, &payload).expect("frame");
+        let parsed = parse_metadata_payload_frame(&frame).expect("parse metadata");
         assert_eq!(parsed.hostname, "node-a");
-        assert_eq!(parsed.gpu_num, 2);
-        assert_eq!(parsed.payload_len, 4096);
+        assert_eq!(parsed.gres.len(), 1);
     }
 
     #[test]
@@ -204,12 +201,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_data_payload_frame_into_snapshot() {
-        let payload = encode_snapshot_payload(&snapshot()).expect("payload");
-        let frame = build_data_payload_frame(12, &payload).expect("frame");
-        let parsed = parse_data_payload_frame(&frame).expect("snapshot");
-        assert_eq!(parsed.hostname, "node-a");
-        assert_eq!(parsed.gpus[0].utilization.gpu_percent, 88);
+    fn parses_runtime_payload_frame() {
+        let runtime = RuntimeSnapshot::from_snapshot(&snapshot());
+        let payload = encode_runtime_payload(&runtime).expect("runtime payload");
+        let frame = build_runtime_payload_frame(12, &payload).expect("frame");
+        let parsed = parse_runtime_payload_frame(&frame).expect("runtime");
+        assert_eq!(parsed.gres[0].utilization.gres_percent, 88);
     }
 
     #[test]
@@ -223,11 +220,11 @@ mod tests {
     #[test]
     fn rejects_unexpected_frame_type() {
         let frame = build_query_request_frame(14).expect("frame");
-        let err = parse_data_payload_frame(&frame).unwrap_err();
+        let err = parse_runtime_payload_frame(&frame).unwrap_err();
         assert_eq!(
             err,
             TransportError::UnexpectedFrameType {
-                expected: FrameType::DataPayload,
+                expected: FrameType::RuntimePayload,
                 got: FrameType::QueryRequest,
             }
         );

@@ -5,10 +5,12 @@ use serde::{Deserialize, Serialize};
 pub struct ConnectingConfig {
     pub port_range: [u16; 2],
     pub multicast_addr: String,
-    #[serde(default = "default_kcp_port")]
-    pub kcp_port: u16,
     #[serde(default = "default_tcp_port")]
     pub tcp_port: u16,
+    #[serde(default = "default_udp_port")]
+    pub udp_port: u16,
+    #[serde(default = "default_udp_mtu")]
+    pub udp_mtu: u16,
     #[serde(default = "default_protocol")]
     pub protocol: String,
     #[serde(default = "default_heartbeat_interval_secs")]
@@ -21,8 +23,6 @@ pub struct ConnectingConfig {
     pub discover_wait_secs: u64,
     #[serde(default = "default_multicast_retry_limit")]
     pub multicast_retry_limit: u32,
-    #[serde(default = "default_kcp_retry_limit")]
-    pub kcp_retry_limit: u32,
     #[serde(default)]
     pub multicast_outbound_ip: Vec<String>,
 }
@@ -74,12 +74,15 @@ fn default_max_connections() -> usize {
     64
 }
 fn default_protocol() -> String {
-    "kcp".to_string()
-}
-fn default_kcp_port() -> u16 {
-    0
+    "udp".to_string()
 }
 fn default_tcp_port() -> u16 {
+    0
+}
+fn default_udp_port() -> u16 {
+    0
+}
+fn default_udp_mtu() -> u16 {
     0
 }
 fn default_discover_wait_secs() -> u64 {
@@ -87,9 +90,6 @@ fn default_discover_wait_secs() -> u64 {
 }
 fn default_multicast_retry_limit() -> u32 {
     5
-}
-fn default_kcp_retry_limit() -> u32 {
-    3
 }
 fn default_log_max_size() -> String {
     "5mb".to_string()
@@ -115,13 +115,13 @@ mod tests {
 [connecting]
 port_range = [30000, 40000]
 multicast_addr = "239.0.0.1:4000"
-kcp_port = 0
 tcp_port = 0
-protocol = "kcp" # or "tcp"
+udp_port = 0
+udp_mtu = 0
+protocol = "udp" # or "tcp"
 heartbeat_interval = 5
 connection_idle_timeout = 10
 max_connections = 64
-kcp_retry_limit = 3
 
 [log]
 max_size = "5mb"
@@ -135,14 +135,14 @@ latency_display = true
         .expect("config should deserialize with defaults");
 
         assert_eq!(cfg.connecting.discover_wait_secs, 5);
-        assert_eq!(cfg.connecting.protocol, "kcp");
-        assert_eq!(cfg.connecting.kcp_port, 0);
+        assert_eq!(cfg.connecting.protocol, "udp");
         assert_eq!(cfg.connecting.tcp_port, 0);
+        assert_eq!(cfg.connecting.udp_port, 0);
+        assert_eq!(cfg.connecting.udp_mtu, 0);
         assert_eq!(cfg.connecting.multicast_retry_limit, 5);
         assert_eq!(cfg.connecting.heartbeat_interval, 5);
         assert_eq!(cfg.connecting.connection_idle_timeout, 10);
         assert_eq!(cfg.connecting.max_connections, 64);
-        assert_eq!(cfg.connecting.kcp_retry_limit, 3);
         assert!(cfg.connecting.multicast_outbound_ip.is_empty());
         assert_eq!(cfg.services.collector_interval_ms, 25);
         assert!(cfg.services.latency_display);

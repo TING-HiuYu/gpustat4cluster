@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use common::{encode_snapshot_payload, ErrorCode, ServerGresSnapshot};
+use common::{ErrorCode, ServerGresSnapshot};
 
 use crate::collector::GresCollector;
 
@@ -11,8 +11,6 @@ const LATENCY_SAMPLE_LIMIT: usize = 128;
 
 #[derive(Debug, Clone)]
 pub struct CacheEntry {
-    pub timestamp_ms: i64,
-    pub payload: Arc<Vec<u8>>,
     pub snapshot: Arc<ServerGresSnapshot>,
     collected_at: Instant,
 }
@@ -175,10 +173,7 @@ impl GresCache {
         let started = Instant::now();
         let result = collector.collect_gres_snapshot().and_then(|snapshot| {
             let snapshot = omit_process_commands(snapshot);
-            let payload = encode_snapshot_payload(&snapshot).map_err(|_| ErrorCode::Internal)?;
             Ok(CacheEntry {
-                timestamp_ms: now_ms(),
-                payload: Arc::new(payload),
                 snapshot: Arc::new(snapshot),
                 collected_at: Instant::now(),
             })
@@ -517,11 +512,4 @@ mod tests {
         assert_eq!(entry.snapshot.hostname, "test-host");
         assert_eq!(entry.snapshot.gres[0].processes[0].command, None);
     }
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or(0)
 }

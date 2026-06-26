@@ -1,13 +1,8 @@
 mod cache;
 mod collector;
-#[cfg(feature = "kcp-transport")]
-mod kcp_transport;
-mod model;
-#[cfg(any(feature = "kcp-transport", test))]
 mod transport;
+mod udp_transport;
 
-#[cfg(feature = "kcp-transport")]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     fs,
     io::{Read, Write},
@@ -19,12 +14,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
 use cache::GresCache;
 use chrono::Local;
 use collector::{GresCollector, NvmlCollector};
 use common::{Config, DiscoveryAnnounce, DiscoveryQuery, ErrorCode, PROTOCOL_VERSION};
-use model::SnapshotSummary;
 use serde_json::json;
 use serde_json::Value;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -104,16 +97,14 @@ fn log_json_stderr(mut value: Value) {
 fn run() -> Result<(), StartupError> {
     let config_path = get_config_path();
     let config = load_config(&config_path)?;
-    let kcp_enabled = kcp_enabled_from_config(&config);
-
     let multicast_addr = validate_multicast_addr(&config.connecting.multicast_addr)?;
     let multicast_outbound_ip =
         validate_multicast_outbound_ips(&config.connecting.multicast_outbound_ip)?;
-    let kcp_port = pick_udp_port(config.connecting.port_range, config.connecting.kcp_port)?;
+    let udp_port = pick_udp_port(config.connecting.port_range, config.connecting.udp_port)?;
     let tcp_port = pick_tcp_port(
         config.connecting.port_range,
         config.connecting.tcp_port,
-        Some(kcp_port),
+        Some(udp_port),
     )?;
 
     let hostname = detect_hostname();
@@ -126,11 +117,6 @@ fn run() -> Result<(), StartupError> {
     let _query_addr =
         std::env::var(QUERY_LISTEN_ENV).unwrap_or_else(|_| DEFAULT_QUERY_ADDR.to_string());
     let metrics = cache.metrics();
-    #[cfg(feature = "kcp-transport")]
-    if kcp_enabled {
-        install_signal_handler();
-    }
-
     log_json_stdout(json!({
         "level":"INFO",
         "event":"startup",
@@ -138,10 +124,10 @@ fn run() -> Result<(), StartupError> {
         "protocol_version": PROTOCOL_VERSION,
         "config":config_path.display().to_string(),
         "hostname": hostname.clone(),
-        "kcp_port":kcp_port,
+        "udp_port":udp_port,
+        "udp_mtu": config.connecting.udp_mtu,
         "tcp_port":tcp_port,
-        "protocols": ["kcp", "tcp"],
-        "kcp_enabled": kcp_enabled,
+        "protocols": ["udp", "tcp"],
         "multicast":multicast_addr.to_string(),
         "multicast_outbound_ip": multicast_outbound_ip.iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
         "degraded":degraded,
@@ -151,7 +137,7 @@ fn run() -> Result<(), StartupError> {
         "heartbeat_interval": config.connecting.heartbeat_interval,
         "connection_idle_timeout": config.connecting.connection_idle_timeout,
         "max_connections": config.connecting.max_connections,
-        "kcp_retry_limit": config.connecting.kcp_retry_limit,
+        "udp_addr":format!("0.0.0.0:{udp_port}"),
         "tcp_addr":format!("0.0.0.0:{tcp_port}"),
         "metrics": {
             "cache_hits": metrics.cache_hits,
@@ -168,7 +154,7 @@ fn run() -> Result<(), StartupError> {
     }));
 
     start_runtime_loops(
-        kcp_port,
+        udp_port,
         tcp_port,
         multicast_addr,
         hostname,
@@ -178,9 +164,8 @@ fn run() -> Result<(), StartupError> {
         collector_interval_ms,
         config.connecting.multicast_retry_limit,
         config.connecting.connection_idle_timeout,
-        config.connecting.max_connections,
         multicast_outbound_ip,
-        kcp_enabled,
+        config.connecting.udp_mtu,
     )
 }
 
@@ -271,7 +256,6 @@ fn validate_config(config: &Config) -> Result<(), StartupError> {
         config.connecting.connection_idle_timeout,
     )?;
     validate_positive("max_connections", config.connecting.max_connections as u64)?;
-    validate_positive("kcp_retry_limit", config.connecting.kcp_retry_limit as u64)?;
     validate_positive("discover_wait_secs", config.connecting.discover_wait_secs)?;
     validate_positive(
         "multicast_retry_limit",
@@ -284,11 +268,11 @@ fn validate_config(config: &Config) -> Result<(), StartupError> {
 
 fn validate_protocol(raw: &str) -> Result<(), StartupError> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "kcp" | "tcp" => Ok(()),
+        "udp" | "tcp" => Ok(()),
         other => Err(StartupError::new(
             ErrorCode::ConfigInvalid,
             format!(
-                "invalid connecting.protocol '{}': expected 'kcp' or 'tcp'",
+                "invalid connecting.protocol '{}': expected 'udp' or 'tcp'",
                 other
             ),
         )),
@@ -418,17 +402,37 @@ fn validate_multicast_outbound_ips(raw: &[String]) -> Result<Vec<Ipv4Addr>, Star
 }
 
 fn pick_udp_port(range: [u16; 2], requested: u16) -> Result<u16, StartupError> {
+    pick_udp_port_excluding(range, requested, None)
+}
+
+fn pick_udp_port_excluding(
+    range: [u16; 2],
+    requested: u16,
+    exclude: Option<u16>,
+) -> Result<u16, StartupError> {
     if requested != 0 {
+        if Some(requested) == exclude {
+            return Err(StartupError::new(
+                ErrorCode::PortExhausted,
+                format!(
+                    "configured udp_port {} conflicts with another UDP port",
+                    requested
+                ),
+            ));
+        }
         if UdpSocket::bind(("0.0.0.0", requested)).is_ok() {
             return Ok(requested);
         }
         return Err(StartupError::new(
             ErrorCode::PortExhausted,
-            format!("configured kcp_port {} is not available", requested),
+            format!("configured udp_port {} is not available", requested),
         ));
     }
     let [start, end] = range;
     for port in port_candidates(range) {
+        if Some(port) == exclude {
+            continue;
+        }
         if UdpSocket::bind(("0.0.0.0", port)).is_ok() {
             return Ok(port);
         }
@@ -449,7 +453,7 @@ fn pick_tcp_port(
         if Some(requested) == exclude {
             return Err(StartupError::new(
                 ErrorCode::PortExhausted,
-                format!("configured tcp_port {} conflicts with kcp_port", requested),
+                format!("configured tcp_port {} conflicts with udp_port", requested),
             ));
         }
         if TcpListener::bind(("0.0.0.0", requested)).is_ok() {
@@ -489,7 +493,7 @@ fn port_candidates([start, end]: [u16; 2]) -> Vec<u16> {
 }
 
 fn start_runtime_loops(
-    kcp_port: u16,
+    udp_port: u16,
     tcp_port: u16,
     multicast: SocketAddr,
     hostname: String,
@@ -499,25 +503,13 @@ fn start_runtime_loops(
     collector_interval_ms: u64,
     multicast_retry_limit: u32,
     connection_idle_timeout_secs: u64,
-    #[cfg_attr(not(feature = "kcp-transport"), allow(unused_variables))] max_connections: usize,
     multicast_outbound_ip: Vec<Ipv4Addr>,
-    #[cfg_attr(not(feature = "kcp-transport"), allow(unused_variables))] kcp_enabled: bool,
+    udp_mtu: u16,
 ) -> Result<(), StartupError> {
     let local_ip = multicast_outbound_ip
         .first()
         .map(|ip| ip.to_string())
         .unwrap_or_else(infer_local_ip);
-
-    #[cfg(feature = "kcp-transport")]
-    let kcp = maybe_spawn_kcp_server(
-        kcp_enabled,
-        kcp_port,
-        Arc::clone(&collector),
-        Arc::clone(&cache),
-        ttl_ms,
-        connection_idle_timeout_secs,
-        max_connections,
-    );
 
     let refresh_collector = Arc::clone(&collector);
     let refresh_cache = Arc::clone(&cache);
@@ -530,6 +522,21 @@ fn start_runtime_loops(
         )
     });
 
+    let udp_hostname = hostname.clone();
+    let udp_collector = Arc::clone(&collector);
+    let udp_cache = Arc::clone(&cache);
+    let udp = thread::spawn(move || {
+        udp_transport::server_loop(
+            &format!("0.0.0.0:{udp_port}"),
+            udp_hostname,
+            udp_collector,
+            udp_cache,
+            ttl_ms,
+            Duration::from_secs(connection_idle_timeout_secs),
+            udp_mtu,
+        )
+    });
+
     let discovery_hostname = hostname.clone();
     let discovery_ip = local_ip.clone();
     let discovery_outbound_ip = multicast_outbound_ip.clone();
@@ -538,12 +545,13 @@ fn start_runtime_loops(
             multicast,
             discovery_hostname,
             discovery_ip,
-            kcp_port,
+            udp_port,
             tcp_port,
             discovery_outbound_ip,
         )
     });
 
+    let q_hostname = hostname.clone();
     let ann_hostname = hostname;
     let ann_ip = local_ip;
     let ann_outbound_ip = multicast_outbound_ip;
@@ -553,7 +561,7 @@ fn start_runtime_loops(
             multicast,
             ann_hostname,
             ann_ip,
-            kcp_port,
+            udp_port,
             tcp_port,
             multicast_retry_limit,
             ann_outbound_ip,
@@ -565,6 +573,7 @@ fn start_runtime_loops(
     let query = thread::spawn(move || {
         query_server_loop(
             &format!("0.0.0.0:{tcp_port}"),
+            q_hostname,
             q_collector,
             q_cache,
             ttl_ms,
@@ -574,10 +583,7 @@ fn start_runtime_loops(
 
     let _ = ann.join();
     let _ = discovery.join();
-    #[cfg(feature = "kcp-transport")]
-    if let Some(kcp) = kcp {
-        let _ = kcp.join();
-    }
+    let _ = udp.join();
     let _ = refresh.join();
     let _ = query.join();
     Ok(())
@@ -606,85 +612,15 @@ fn background_refresh_loop(
     }
 }
 
-#[cfg(feature = "kcp-transport")]
-fn kcp_enabled_from_config(_config: &Config) -> bool {
-    true
-}
-
-#[cfg(not(feature = "kcp-transport"))]
-fn kcp_enabled_from_config(_config: &Config) -> bool {
-    false
-}
-
-#[cfg(feature = "kcp-transport")]
-fn maybe_spawn_kcp_server(
-    kcp_enabled: bool,
-    bind_port: u16,
-    collector: Arc<dyn GresCollector>,
-    cache: Arc<GresCache>,
-    ttl_ms: u64,
-    connection_idle_timeout_secs: u64,
-    max_connections: usize,
-) -> Option<thread::JoinHandle<()>> {
-    if !kcp_enabled {
-        return None;
-    }
-
-    let hostname = detect_hostname();
-    let context = Arc::new(transport::TransportContext::new(
-        hostname, collector, cache, ttl_ms,
-    ));
-    let bind_addr = std::net::SocketAddr::from(([0, 0, 0, 0], bind_port));
-
-    match kcp_transport::spawn_kcp_server(
-        bind_addr,
-        context,
-        std::time::Duration::from_secs(connection_idle_timeout_secs),
-        max_connections,
-    ) {
-        Ok(handle) => {
-            log_json_stdout(
-                json!({"level":"INFO","event":"kcp_start","addr":bind_addr.to_string()}),
-            );
-            Some(handle)
-        }
-        Err(err) => {
-            log_json_stderr(
-                json!({"level":"WARN","event":"kcp_error","code":ErrorCode::KcpInitFailed.to_string(),"message":format!("kcp spawn failed: {}", err)}),
-            );
-            None
-        }
-    }
-}
-
-#[cfg(feature = "kcp-transport")]
-fn install_signal_handler() {
-    static INSTALLED: AtomicBool = AtomicBool::new(false);
-    if INSTALLED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    if let Err(err) = ctrlc::set_handler(move || {
-        kcp_transport::disconnect_all_active_blocking("server graceful shutdown: signal");
-        process::exit(0);
-    }) {
-        log_json_stderr(json!({
-            "level":"WARN",
-            "event":"signal_handler_error",
-            "message": format!("signal handler disabled: {err}")
-        }));
-    }
-}
-
-fn discovery_announce(hostname: &str, ip: &str, kcp_port: u16, tcp_port: u16) -> DiscoveryAnnounce {
+fn discovery_announce(hostname: &str, ip: &str, udp_port: u16, tcp_port: u16) -> DiscoveryAnnounce {
     DiscoveryAnnounce {
         version: PROTOCOL_VERSION,
         hostname: hostname.to_string(),
         ip: ip.to_string(),
-        port: kcp_port,
-        kcp_port: Some(kcp_port),
+        port: udp_port,
         tcp_port: Some(tcp_port),
-        udp_port: None,
+        udp_port: Some(udp_port),
+        kcp_port: None,
         ttl: None,
         load: None,
         degraded: Some(false),
@@ -695,7 +631,7 @@ fn announce_startup_once(
     multicast: SocketAddr,
     hostname: String,
     ip: String,
-    kcp_port: u16,
+    udp_port: u16,
     tcp_port: u16,
     retry_limit: u32,
     multicast_outbound_ip: Vec<Ipv4Addr>,
@@ -712,7 +648,7 @@ fn announce_startup_once(
             let announce_ip = interface
                 .map(|ip| ip.to_string())
                 .unwrap_or_else(|| ip.clone());
-            let announce = discovery_announce(&hostname, &announce_ip, kcp_port, tcp_port);
+            let announce = discovery_announce(&hostname, &announce_ip, udp_port, tcp_port);
             let msg = match serde_json::to_vec(&announce) {
                 Ok(msg) => msg,
                 Err(e) => {
@@ -764,7 +700,7 @@ fn discovery_query_loop(
     multicast: SocketAddr,
     hostname: String,
     ip: String,
-    kcp_port: u16,
+    udp_port: u16,
     tcp_port: u16,
     multicast_outbound_ip: Vec<Ipv4Addr>,
 ) {
@@ -811,7 +747,7 @@ fn discovery_query_loop(
         match sock.recv_from(&mut buf) {
             Ok((n, src)) => {
                 if serde_json::from_slice::<DiscoveryQuery>(&buf[..n]).is_ok() {
-                    let announce = discovery_announce(&hostname, &ip, kcp_port, tcp_port);
+                    let announce = discovery_announce(&hostname, &ip, udp_port, tcp_port);
                     if let Ok(msg) = serde_json::to_vec(&announce) {
                         let _ = sock.send_to(&msg, src);
                     }
@@ -854,6 +790,7 @@ fn multicast_route_hint(message: String, error: &std::io::Error) -> String {
 
 fn query_server_loop(
     listen_addr: &str,
+    hostname: String,
     collector: Arc<dyn GresCollector>,
     cache: Arc<GresCache>,
     ttl_ms: u64,
@@ -863,7 +800,7 @@ fn query_server_loop(
         Ok(l) => l,
         Err(e) => {
             log_json_stderr(
-                json!({"level":"WARN","event":"query_error","code":ErrorCode::KcpInitFailed.to_string(),"message":format!("query bind failed on {}: {}", listen_addr, e)}),
+                json!({"level":"WARN","event":"query_error","code":ErrorCode::Internal.to_string(),"message":format!("query bind failed on {}: {}", listen_addr, e)}),
             );
             return;
         }
@@ -873,12 +810,16 @@ fn query_server_loop(
     for conn in listener.incoming() {
         match conn {
             Ok(mut stream) => {
-                let collector = Arc::clone(&collector);
-                let cache = Arc::clone(&cache);
+                let context = transport::TransportContext::new(
+                    hostname.clone(),
+                    Arc::clone(&collector),
+                    Arc::clone(&cache),
+                    ttl_ms,
+                );
                 thread::spawn(move || {
                     let _ = stream.set_read_timeout(Some(connection_idle_timeout));
                     let _ = stream.set_write_timeout(Some(connection_idle_timeout));
-                    handle_query_stream(&mut stream, &collector, &cache, ttl_ms);
+                    handle_query_stream(&mut stream, &context);
                 });
             }
             Err(e) => log_json_stderr(
@@ -888,68 +829,62 @@ fn query_server_loop(
     }
 }
 
-fn handle_query_stream(
-    stream: &mut TcpStream,
-    collector: &Arc<dyn GresCollector>,
-    cache: &Arc<GresCache>,
-    ttl_ms: u64,
-) {
-    let mut buf = [0u8; 16];
-    let _ = stream.read(&mut buf);
+fn handle_query_stream(stream: &mut TcpStream, context: &transport::TransportContext) {
+    loop {
+        let frame = match read_tcp_frame(stream) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return,
+            Err(e) => {
+                log_json_stderr(
+                    json!({"level":"WARN","event":"query_error","code":ErrorCode::Internal.to_string(),"message":format!("read TCP frame failed: {}", e)}),
+                );
+                return;
+            }
+        };
 
-    match cache.get_latest_or_refresh(collector.as_ref(), ttl_ms) {
-        Ok(entry) => {
-            let metrics = cache.metrics();
-            let body = json!({
-                "ok": true,
-                "timestamp_ms": entry.timestamp_ms,
-                "gpu_num": entry.snapshot.gpu_num(),
-                "gres_num": entry.snapshot.gres_num(),
-                "avg_utilization": entry.snapshot.avg_utilization(),
-                "payload_len": entry.payload.len(),
-                "payload_b64": BASE64_STANDARD.encode(entry.payload.as_slice()),
-                "metrics": {
-                    "cache_hits": metrics.cache_hits,
-                    "cache_misses": metrics.cache_misses,
-                    "merge_count": metrics.merge_count,
-                    "collect_count": metrics.collect_count,
-                    "avg_collect_latency_us": metrics.avg_collect_latency_us,
-                    "collect_latency_p50_us": metrics.collect_latency_p50_us,
-                    "collect_latency_p95_us": metrics.collect_latency_p95_us,
-                    "cache_hit_rate_bps": metrics.cache_hit_rate_bps,
-                    "cache_miss_rate_bps": metrics.cache_miss_rate_bps,
-                    "merge_ratio_bps": metrics.merge_ratio_bps,
-                }
-            })
-            .to_string();
-            let _ = stream.write_all(body.as_bytes());
-        }
-        Err(code) => {
-            log_json_stderr(
-                json!({"level":"WARN","event":"query_error","code":code.to_string(),"message":"collector unavailable in degraded mode"}),
-            );
-            let metrics = cache.metrics();
-            let body = json!({
-                "ok":false,
-                "error_code":code.to_string(),
-                "message":"collector unavailable in degraded mode",
-                "metrics": {
-                    "cache_hits": metrics.cache_hits,
-                    "cache_misses": metrics.cache_misses,
-                    "merge_count": metrics.merge_count,
-                    "collect_count": metrics.collect_count,
-                    "avg_collect_latency_us": metrics.avg_collect_latency_us,
-                    "collect_latency_p50_us": metrics.collect_latency_p50_us,
-                    "collect_latency_p95_us": metrics.collect_latency_p95_us,
-                    "cache_hit_rate_bps": metrics.cache_hit_rate_bps,
-                    "cache_miss_rate_bps": metrics.cache_miss_rate_bps,
-                    "merge_ratio_bps": metrics.merge_ratio_bps,
-                }
-            })
-            .to_string();
-            let _ = stream.write_all(body.as_bytes());
+        let response = match context.handle_frame(&frame) {
+            Ok(response) => response,
+            Err(e) => {
+                log_json_stderr(
+                    json!({"level":"WARN","event":"query_error","code":ErrorCode::Internal.to_string(),"message":format!("handle TCP frame failed: {}", e)}),
+                );
+                return;
+            }
+        };
+
+        if stream.write_all(&response).is_err() || stream.flush().is_err() {
+            return;
         }
     }
+}
+
+fn read_tcp_frame(stream: &mut TcpStream) -> Result<Option<Vec<u8>>, std::io::Error> {
+    let mut header_bytes = [0u8; common::FRAME_HEADER_LEN];
+    match stream.read_exact(&mut header_bytes) {
+        Ok(()) => {}
+        Err(e)
+            if e.kind() == std::io::ErrorKind::UnexpectedEof
+                || e.kind() == std::io::ErrorKind::ConnectionReset =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    }
+    let header = common::FrameHeader::decode(&header_bytes).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid frame header: {e:?}"),
+        )
+    })?;
+    let payload_len = header.payload_len as usize;
+    let mut frame = Vec::with_capacity(common::FRAME_HEADER_LEN + payload_len);
+    frame.extend_from_slice(&header_bytes);
+    if payload_len > 0 {
+        let mut payload = vec![0u8; payload_len];
+        stream.read_exact(&mut payload)?;
+        frame.extend_from_slice(&payload);
+    }
+    Ok(Some(frame))
 }
 
 #[cfg(test)]
@@ -1002,13 +937,13 @@ mod tests {
             connecting: ConnectingConfig {
                 port_range: [30_000, 30_010],
                 multicast_addr: "239.0.0.1:4000".to_string(),
-                kcp_port: 0,
                 tcp_port: 0,
-                protocol: "kcp".to_string(),
+                udp_port: 0,
+                udp_mtu: 0,
+                protocol: "udp".to_string(),
                 heartbeat_interval: 5,
                 connection_idle_timeout: 10,
                 max_connections: 64,
-                kcp_retry_limit: 3,
                 discover_wait_secs: 5,
                 multicast_retry_limit: 5,
                 multicast_outbound_ip: Vec::new(),
@@ -1051,11 +986,10 @@ mod tests {
 [connecting]
 port_range = [30000, 30010]
 multicast_addr = "239.0.0.1:4000"
-protocol = "kcp" # or "tcp"
+protocol = "udp" # or "tcp"
 heartbeat_interval = 5
 connection_idle_timeout = 10
 max_connections = 64
-kcp_retry_limit = 3
 discover_wait_secs = 5
 multicast_retry_limit = 5
 # Optional: one or more local IPv4 addresses used as multicast outbound interfaces.
@@ -1127,7 +1061,7 @@ cache_ttl_ms = 0
         let mut config = valid_config();
         config.connecting.max_connections = 0;
         assert!(validate_config(&config)
-            .expect_err("invalid kcp runtime threads")
+            .expect_err("invalid max connections")
             .message
             .contains("max_connections"));
 
@@ -1146,56 +1080,11 @@ cache_ttl_ms = 0
         assert_eq!(parse_log_size_bytes("512").unwrap(), 512);
     }
 
-    #[cfg(feature = "mock-nvml")]
-    #[test]
-    fn startup_mode_selection_uses_mock_when_requested() {
-        let _guard = crate::collector::ENV_TEST_LOCK
-            .lock()
-            .expect("env test lock");
-        std::env::remove_var("GPUSTAT4CLUSTER_SIMULATE_NVML_MISSING");
-        std::env::set_var(collector::COLLECTOR_ENV, "mock");
-        std::env::set_var(collector::MOCK_HOSTNAME_ENV, "mock-startup-node");
-        std::env::set_var(collector::MOCK_GPU_COUNT_ENV, "2");
-
-        let (_collector, degraded, mode) =
-            build_collector("test-host", &valid_config()).expect("mock collector");
-
-        std::env::remove_var(collector::COLLECTOR_ENV);
-        std::env::remove_var(collector::MOCK_HOSTNAME_ENV);
-        std::env::remove_var(collector::MOCK_GPU_COUNT_ENV);
-        assert!(!degraded);
-        assert_eq!(mode, "mock-nvml");
-    }
-
-    #[cfg(not(feature = "mock-nvml"))]
-    #[test]
-    fn startup_mode_selection_ignores_mock_env_without_feature() {
-        let _guard = crate::collector::ENV_TEST_LOCK
-            .lock()
-            .expect("env test lock");
-        std::env::remove_var("GPUSTAT4CLUSTER_SIMULATE_NVML_MISSING");
-        std::env::set_var(collector::COLLECTOR_ENV, "mock");
-        std::env::set_var(collector::MOCK_HOSTNAME_ENV, "mock-startup-node");
-        std::env::set_var(collector::MOCK_GPU_COUNT_ENV, "2");
-
-        let err = match build_collector("test-host", &valid_config()) {
-            Ok(_) => panic!("expected nvml unavailable"),
-            Err(err) => err,
-        };
-
-        std::env::remove_var(collector::COLLECTOR_ENV);
-        std::env::remove_var(collector::MOCK_HOSTNAME_ENV);
-        std::env::remove_var(collector::MOCK_GPU_COUNT_ENV);
-        assert_eq!(err.code, ErrorCode::NvmlUnavailable);
-    }
-
     #[test]
     fn startup_mode_selection_fails_when_nvml_missing() {
         let _guard = crate::collector::ENV_TEST_LOCK
             .lock()
             .expect("env test lock");
-        std::env::remove_var(collector::COLLECTOR_ENV);
-        std::env::remove_var(collector::FORCE_MOCK_ENV);
         std::env::set_var("GPUSTAT4CLUSTER_SIMULATE_NVML_MISSING", "1");
 
         let err = match build_collector("test-host", &valid_config()) {
