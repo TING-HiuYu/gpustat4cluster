@@ -203,7 +203,7 @@ jobs:
         run: |
           set -euxo pipefail
           for target in x86_64-apple-darwin aarch64-apple-darwin; do
-            cargo build --locked --release --target "$target" -p gpustat4cluster-client-backend --features kcp-transport
+            cargo build --locked --release --target "$target" -p gpustat4cluster-client-backend
             cargo build --locked --release --target "$target" -p gpustat4cluster-client-cli
           done
 
