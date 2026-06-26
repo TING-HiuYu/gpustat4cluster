@@ -12,6 +12,11 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
 jobs:
   resolve-target:
     name: resolve build target

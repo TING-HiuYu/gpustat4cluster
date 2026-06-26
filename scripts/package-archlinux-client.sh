@@ -13,6 +13,22 @@ log() { printf '[arch-package] %s\n' "$*"; }
 fail() { printf '[arch-package][error] %s\n' "$*" >&2; exit 1; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
 
+cargo_retry() {
+  local attempt=1
+  local max_attempts="${CARGO_BUILD_RETRY_LIMIT:-3}"
+  while true; do
+    if cargo "$@"; then
+      return 0
+    fi
+    if (( attempt >= max_attempts )); then
+      return 1
+    fi
+    log "cargo $* failed; retrying ($attempt/$max_attempts)"
+    sleep $(( attempt * 3 ))
+    attempt=$(( attempt + 1 ))
+  done
+}
+
 cleanup() {
   local status=$?
   [[ -n "$TMP_DIR" ]] && rm -rf "$TMP_DIR"
@@ -57,8 +73,8 @@ build_release_binaries() {
   log "building native release client binaries"
   (
     cd "$ROOT_DIR"
-    cargo build --locked --release -p gpustat4cluster-client-backend
-    cargo build --locked --release -p gpustat4cluster-client-cli
+    cargo_retry build --locked --release -p gpustat4cluster-client-backend
+    cargo_retry build --locked --release -p gpustat4cluster-client-cli
   )
 }
 

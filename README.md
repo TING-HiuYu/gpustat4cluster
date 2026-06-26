@@ -132,7 +132,7 @@ gpustat
 也可以用环境变量覆盖：
 
 ```bash
-GPUSTAT4CLUSTER_CONFIG=/path/to/config.toml gpustat4cluster-client-backend
+GPUSTAT4CLUSTER_CONFIG=/path/to/client.toml gpustat4cluster-client-backend
 ```
 
 ### `[connecting]`

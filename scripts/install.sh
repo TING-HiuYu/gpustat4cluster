@@ -162,8 +162,8 @@ install_one_tar() {
   as_root tar -xzf "$local_tar" -C "$ROOT_DIR"
 }
 
-write_default_config() {
-  local cfg="$ETC_DIR/config.toml"
+write_server_config() {
+  local cfg="$ETC_DIR/server.toml"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[dry-run] init config: $cfg"
     return 0
@@ -174,7 +174,9 @@ write_default_config() {
 [connecting]
 port_range = [30000, 40000]
 multicast_addr = "239.0.0.1:4000"
-protocol = "udp" # or "tcp"
+udp_port = 0
+tcp_port = 0
+udp_mtu = 0
 heartbeat_interval = 5
 connection_idle_timeout = 10
 max_connections = 64
@@ -188,7 +190,9 @@ max_size = "5mb"
 
 [services]
 cache_ttl_ms = 40
-# Optional: UDS path for client frontend <-> client-backend.
+collector_interval_ms = 25
+latency_display = true
+
 [runtime]
 # Leave unset to use the dynamic loader default: libnvidia-ml.so.
 # Set this when the host only provides a versioned runtime library.
@@ -199,6 +203,52 @@ EOF
   as_root chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$ETC_DIR"
   as_root chmod 0755 "$ETC_DIR"
   as_root chmod 0644 "$cfg"
+}
+
+write_client_config() {
+  local cfg="$ETC_DIR/client.toml"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] init config: $cfg"
+    return 0
+  fi
+
+  if [[ ! -f "$cfg" ]]; then
+    as_root tee "$cfg" >/dev/null <<'EOF'
+[connecting]
+port_range = [30000, 40000]
+multicast_addr = "239.0.0.1:4000"
+protocol = "udp" # or "tcp"
+udp_mtu = 0
+heartbeat_interval = 5
+connection_idle_timeout = 10
+max_connections = 64
+discover_wait_secs = 5
+multicast_retry_limit = 5
+# Optional: one or more local IPv4 addresses used as multicast outbound interfaces.
+# multicast_outbound_ip = ["192.0.2.11"]
+
+[log]
+max_size = "5mb"
+
+[services]
+cache_ttl_ms = 40
+collector_interval_ms = 25
+latency_display = true
+EOF
+  fi
+
+  as_root chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$ETC_DIR"
+  as_root chmod 0755 "$ETC_DIR"
+  as_root chmod 0644 "$cfg"
+}
+
+write_default_config() {
+  if [[ "$ROLE" == "server" || "$ROLE" == "both" ]]; then
+    write_server_config
+  fi
+  if [[ "$ROLE" == "client" || "$ROLE" == "both" ]]; then
+    write_client_config
+  fi
 }
 
 install_systemd() {

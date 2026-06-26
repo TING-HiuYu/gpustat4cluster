@@ -24,6 +24,22 @@ trap cleanup EXIT INT TERM
 
 require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"; }
 
+cargo_retry() {
+  local attempt=1
+  local max_attempts="${CARGO_BUILD_RETRY_LIMIT:-3}"
+  while true; do
+    if cargo "$@"; then
+      return 0
+    fi
+    if (( attempt >= max_attempts )); then
+      return 1
+    fi
+    log "cargo $* failed; retrying ($attempt/$max_attempts)"
+    sleep $(( attempt * 3 ))
+    attempt=$(( attempt + 1 ))
+  done
+}
+
 load_rust_module_if_needed() {
   if command -v cargo >/dev/null 2>&1; then
     return 0
@@ -68,9 +84,9 @@ build_native_release_binaries() {
   log "building native release server/client binaries"
   (
     cd "$ROOT_DIR"
-    cargo build --locked --release -p server --features nvml
-    cargo build --locked --release -p gpustat4cluster-client-backend
-    cargo build --locked --release -p gpustat4cluster-client-cli
+    cargo_retry build --locked --release -p server --features nvml
+    cargo_retry build --locked --release -p gpustat4cluster-client-backend
+    cargo_retry build --locked --release -p gpustat4cluster-client-cli
   )
 }
 
@@ -94,9 +110,9 @@ build_arm64_release_binaries() {
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-rust-lld}"
         ;;
     esac
-    cargo build --locked --release --target "$ARM64_TARGET" -p server --features nvml
-    cargo build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-backend
-    cargo build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-cli
+    cargo_retry build --locked --release --target "$ARM64_TARGET" -p server --features nvml
+    cargo_retry build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-backend
+    cargo_retry build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-cli
   )
 }
 
@@ -273,10 +289,9 @@ install_common_files() {
   chmod 0755 "$pkgdir" "$pkgdir/DEBIAN"
 
   local role_config="$ROOT_DIR/dist/etc/gpustat4cluster/${role}.toml.example"
-  [[ -f "$role_config" ]] || role_config="$ROOT_DIR/dist/etc/gpustat4cluster/config.toml.example"
+  [[ -f "$role_config" ]] || fail "missing role config: $role_config"
   cp "$role_config" "$pkgdir/etc/gpustat4cluster/${role}.toml.example"
   cp "$role_config" "$pkgdir/etc/gpustat4cluster/${role}.toml"
-  cp "$role_config" "$pkgdir/etc/gpustat4cluster/config.toml.example"
   cat >"$pkgdir/DEBIAN/conffiles" <<CONFFILESEOF
 /etc/gpustat4cluster/${role}.toml
 CONFFILESEOF
