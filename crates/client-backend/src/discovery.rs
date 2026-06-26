@@ -229,7 +229,7 @@ fn multicast_route_hint(message: String, error: &std::io::Error) -> String {
 
 #[cfg(test)]
 pub fn parse_announce(msg: &str, src: SocketAddr) -> Option<DiscoveredNode> {
-    parse_announce_for_protocol(msg, src, "kcp")
+    parse_announce_for_protocol(msg, src, "udp")
 }
 
 pub fn parse_announce_for_protocol(
@@ -245,10 +245,10 @@ pub fn parse_announce_for_protocol(
         return None;
     }
 
-    let port = if protocol.eq_ignore_ascii_case("tcp") {
-        ann.tcp_port.unwrap_or(ann.port)
-    } else {
-        ann.kcp_port.unwrap_or(ann.port)
+    let port = match protocol.trim().to_ascii_lowercase().as_str() {
+        "tcp" => ann.tcp_port.unwrap_or(ann.port),
+        "udp" => ann.udp_port.unwrap_or(ann.port),
+        _ => ann.udp_port.unwrap_or(ann.port),
     };
 
     Some(DiscoveredNode {
@@ -273,10 +273,6 @@ fn parse_legacy_announce(msg: &str) -> Option<DiscoveryAnnounce> {
         hostname,
         ip,
         port,
-        kcp_port: raw
-            .get("kcp_port")
-            .and_then(Value::as_u64)
-            .and_then(|v| v.try_into().ok()),
         tcp_port: raw
             .get("tcp_port")
             .and_then(Value::as_u64)
@@ -285,6 +281,7 @@ fn parse_legacy_announce(msg: &str) -> Option<DiscoveryAnnounce> {
             .get("udp_port")
             .and_then(Value::as_u64)
             .and_then(|v| v.try_into().ok()),
+        kcp_port: None,
         ttl: raw
             .get("ttl")
             .and_then(Value::as_u64)

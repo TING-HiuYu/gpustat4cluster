@@ -146,7 +146,7 @@ write_config() {
 [connecting]
 port_range = [$SERVER_PORT_START, $SERVER_PORT_END]
 multicast_addr = "$MULTICAST_ADDR"
-protocol = "kcp" # or "tcp"
+protocol = "udp" # or "tcp"
 heartbeat_interval = 5
 connection_idle_timeout = 10
 max_connections = 64

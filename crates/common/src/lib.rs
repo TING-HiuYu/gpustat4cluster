@@ -3,6 +3,7 @@
 pub mod config;
 pub mod error;
 pub mod protocol;
+pub mod udp;
 
 pub use config::{Config, ConnectingConfig, LogConfig, RuntimeConfig, ServicesConfig};
 pub use error::ErrorCode;

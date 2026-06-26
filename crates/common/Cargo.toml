@@ -6,6 +6,7 @@ license = "MIT"
 description = "Common protocol/config types for gpustat4cluster"
 
 [dependencies]
+crc32fast = "1"
 rkyv = "0.8.16"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"

@@ -1,11 +1,11 @@
 [connecting]
 port_range = [30000, 40000]
 multicast_addr = "239.0.0.1:4000"
-protocol = "kcp" # or "tcp"
+protocol = "udp" # or "tcp"
+udp_mtu = 0 # 0 means auto-detect route MTU, fallback 1200.
 heartbeat_interval = 5
 connection_idle_timeout = 10
 max_connections = 64
-kcp_retry_limit = 3
 discover_wait_secs = 5
 multicast_retry_limit = 5
 # Optional: one or more local IPv4 addresses used as multicast outbound interfaces.

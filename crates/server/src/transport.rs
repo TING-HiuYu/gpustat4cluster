@@ -1,17 +1,14 @@
 use std::{fmt, sync::Arc};
 
-#[cfg(test)]
-use common::decode_snapshot_payload;
 use common::{
-    payload_len_from_archived_len, ErrorCode, FrameDecodeError, FrameHeader, FrameType,
-    HandshakeInfo, HandshakeRequest, QueryRequest, QueryResponse,
+    encode_metadata_payload, encode_runtime_payload, ErrorCode, FrameDecodeError, FrameHeader,
+    FrameType, HandshakeRequest, HostMetadata, QueryRequest, QueryResponse, RuntimeSnapshot,
 };
 
 use crate::cache::GresCache;
 use crate::collector::GresCollector;
 
 pub struct TransportContext {
-    hostname: String,
     collector: Arc<dyn GresCollector>,
     cache: Arc<GresCache>,
     ttl_ms: u64,
@@ -19,13 +16,12 @@ pub struct TransportContext {
 
 impl TransportContext {
     pub fn new(
-        hostname: impl Into<String>,
+        _hostname: impl Into<String>,
         collector: Arc<dyn GresCollector>,
         cache: Arc<GresCache>,
         ttl_ms: u64,
     ) -> Self {
         Self {
-            hostname: hostname.into(),
             collector,
             cache,
             ttl_ms,
@@ -50,6 +46,96 @@ impl TransportContext {
         }
     }
 
+    pub fn handle_empty_query_udp_datagram(
+        &self,
+        request_id: u64,
+        max_payload: usize,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
+        match self
+            .cache
+            .get_latest_or_refresh(self.collector.as_ref(), self.ttl_ms)
+        {
+            Ok(entry) => {
+                let runtime = RuntimeSnapshot::from_snapshot(entry.snapshot.as_ref());
+                let payload = encode_runtime_payload(&runtime)
+                    .map_err(|err| TransportError::Payload(format!("{err:?}")))?;
+                let frame_len = common::FRAME_HEADER_LEN + payload.len();
+                if frame_len > max_payload {
+                    return Ok(None);
+                }
+                common::udp::encode_udp_single_chunk_from_parts(
+                    FrameType::RuntimePayload,
+                    request_id,
+                    &payload,
+                )
+                .map(Some)
+                .map_err(|err| TransportError::Udp(format!("{err:?}")))
+            }
+            Err(code) => {
+                let response = QueryResponse::error(request_id, code);
+                let response_payload = serde_json::to_vec(&response)?;
+                let frame_len = common::FRAME_HEADER_LEN + response_payload.len();
+                if frame_len > max_payload {
+                    return Ok(None);
+                }
+                common::udp::encode_udp_single_chunk_from_parts(
+                    FrameType::QueryResponse,
+                    request_id,
+                    &response_payload,
+                )
+                .map(Some)
+                .map_err(|err| TransportError::Udp(format!("{err:?}")))
+            }
+        }
+    }
+
+    pub fn handle_udp_metadata_datagram(
+        &self,
+        request_id: u64,
+        payload: &[u8],
+        max_payload: usize,
+    ) -> Result<Option<Vec<u8>>, TransportError> {
+        let request: HandshakeRequest = serde_json::from_slice(payload)?;
+        request.validate().map_err(TransportError::Protocol)?;
+
+        match self
+            .cache
+            .get_latest_or_refresh(self.collector.as_ref(), self.ttl_ms)
+        {
+            Ok(entry) => {
+                let metadata = HostMetadata::from_snapshot(entry.snapshot.as_ref());
+                let payload = encode_metadata_payload(&metadata)
+                    .map_err(|err| TransportError::Payload(format!("{err:?}")))?;
+                let frame_len = common::FRAME_HEADER_LEN + payload.len();
+                if frame_len > max_payload {
+                    return Ok(None);
+                }
+                common::udp::encode_udp_single_chunk_from_parts(
+                    FrameType::MetadataPayload,
+                    request_id,
+                    &payload,
+                )
+                .map(Some)
+                .map_err(|err| TransportError::Udp(format!("{err:?}")))
+            }
+            Err(code) => {
+                let response = QueryResponse::error(request_id, code);
+                let response_payload = serde_json::to_vec(&response)?;
+                let frame_len = common::FRAME_HEADER_LEN + response_payload.len();
+                if frame_len > max_payload {
+                    return Ok(None);
+                }
+                common::udp::encode_udp_single_chunk_from_parts(
+                    FrameType::QueryResponse,
+                    request_id,
+                    &response_payload,
+                )
+                .map(Some)
+                .map_err(|err| TransportError::Udp(format!("{err:?}")))
+            }
+        }
+    }
+
     fn handle_handshake(&self, request_id: u64, payload: &[u8]) -> Result<Vec<u8>, TransportError> {
         let request: HandshakeRequest = serde_json::from_slice(payload)?;
         request.validate().map_err(TransportError::Protocol)?;
@@ -59,26 +145,20 @@ impl TransportContext {
             .get_latest_or_refresh(self.collector.as_ref(), self.ttl_ms)
         {
             Ok(entry) => {
-                let payload_len = payload_len_from_archived_len(entry.payload.len())
-                    .map_err(|_| TransportError::Protocol(ErrorCode::Internal))?;
-                let response = HandshakeInfo::current(
-                    self.hostname.clone(),
-                    entry.snapshot.gres.len().min(u8::MAX as usize) as u8,
-                    payload_len,
-                );
-                let response_payload = serde_json::to_vec(&response)?;
+                let metadata = HostMetadata::from_snapshot(entry.snapshot.as_ref());
+                let response_payload = encode_metadata_payload(&metadata)
+                    .map_err(|err| TransportError::Payload(format!("{err:?}")))?;
                 Ok(encode_transport_frame(
-                    FrameType::HandshakeInfo,
+                    FrameType::MetadataPayload,
                     request_id,
                     &response_payload,
                 ))
             }
             Err(code) => {
-                let response = HandshakeInfo::current(self.hostname.clone(), 0, 0);
+                let response = QueryResponse::error(request_id, code);
                 let response_payload = serde_json::to_vec(&response)?;
-                let _ = code;
                 Ok(encode_transport_frame(
-                    FrameType::HandshakeInfo,
+                    FrameType::QueryResponse,
                     request_id,
                     &response_payload,
                 ))
@@ -86,25 +166,35 @@ impl TransportContext {
         }
     }
 
-    fn handle_query(&self, _request_id: u64, payload: &[u8]) -> Result<Vec<u8>, TransportError> {
-        let request: QueryRequest = serde_json::from_slice(payload)?;
-        common::validate_protocol_version(request.version).map_err(TransportError::Protocol)?;
+    fn handle_query(&self, request_id: u64, payload: &[u8]) -> Result<Vec<u8>, TransportError> {
+        let request_id = if payload.is_empty() {
+            request_id
+        } else {
+            let request: QueryRequest = serde_json::from_slice(payload)?;
+            common::validate_protocol_version(request.version).map_err(TransportError::Protocol)?;
+            request.request_id
+        };
 
         match self
             .cache
             .get_latest_or_refresh(self.collector.as_ref(), self.ttl_ms)
         {
-            Ok(entry) => Ok(encode_transport_frame(
-                FrameType::DataPayload,
-                request.request_id,
-                &entry.payload,
-            )),
+            Ok(entry) => {
+                let runtime = RuntimeSnapshot::from_snapshot(entry.snapshot.as_ref());
+                let payload = encode_runtime_payload(&runtime)
+                    .map_err(|err| TransportError::Payload(format!("{err:?}")))?;
+                Ok(encode_transport_frame(
+                    FrameType::RuntimePayload,
+                    request_id,
+                    &payload,
+                ))
+            }
             Err(code) => {
-                let response = QueryResponse::error(request.request_id, code);
+                let response = QueryResponse::error(request_id, code);
                 let response_payload = serde_json::to_vec(&response)?;
                 Ok(encode_transport_frame(
                     FrameType::QueryResponse,
-                    request.request_id,
+                    request_id,
                     &response_payload,
                 ))
             }
@@ -124,6 +214,8 @@ pub enum TransportError {
     UnexpectedFrameType(FrameType),
     Protocol(ErrorCode),
     Json(serde_json::Error),
+    Payload(String),
+    Udp(String),
 }
 
 impl fmt::Display for TransportError {
@@ -135,6 +227,8 @@ impl fmt::Display for TransportError {
             }
             Self::Protocol(code) => write!(formatter, "protocol error: {code:?}"),
             Self::Json(err) => write!(formatter, "json error: {err}"),
+            Self::Payload(err) => write!(formatter, "payload error: {err}"),
+            Self::Udp(err) => write!(formatter, "udp encode error: {err}"),
         }
     }
 }
@@ -213,9 +307,9 @@ mod tests {
                     driver_version: None,
                     gres: vec![GresInfo {
                         index: 0,
-                        name: "mock-gpu".to_string(),
+                        name: "test-gres".to_string(),
                         temperature_c: None,
-                        uuid: Some("GPU-0".to_string()),
+                        uuid: Some("GRES-0".to_string()),
                         memory: GresMemory {
                             used_mb: 1024,
                             total_mb: 81920,
@@ -245,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn handshake_frame_returns_hostname_gpu_num_and_payload_len() {
+    fn handshake_frame_returns_hostname_gres_num_and_payload_len() {
         let ctx = context(Arc::new(StaticCollector::new()));
         let request = request_frame(
             FrameType::HandshakeRequest,
@@ -258,13 +352,12 @@ mod tests {
 
         let response = ctx.handle_frame(&request).expect("handle handshake");
         let decoded = decode_transport_frame(&response).expect("decode response");
-        assert_eq!(decoded.header.frame_type, FrameType::HandshakeInfo);
+        assert_eq!(decoded.header.frame_type, FrameType::MetadataPayload);
         assert_eq!(decoded.header.request_id, 7);
 
-        let info: HandshakeInfo = serde_json::from_slice(&decoded.payload).expect("handshake info");
-        assert_eq!(info.hostname, "node-a");
-        assert_eq!(info.gpu_num, 1);
-        assert!(info.payload_len > 0);
+        let metadata = common::decode_metadata_payload(&decoded.payload).expect("metadata payload");
+        assert_eq!(metadata.hostname, "node-a");
+        assert_eq!(metadata.gres.len(), 1);
     }
 
     #[test]
@@ -282,17 +375,16 @@ mod tests {
 
         let response = ctx.handle_frame(&request).expect("handle query");
         let decoded = decode_transport_frame(&response).expect("decode response");
-        assert_eq!(decoded.header.frame_type, FrameType::DataPayload);
+        assert_eq!(decoded.header.frame_type, FrameType::RuntimePayload);
         assert_eq!(decoded.header.request_id, 99);
 
-        let snapshot = decode_snapshot_payload(&decoded.payload).expect("snapshot payload");
-        assert_eq!(snapshot.hostname, "node-a");
-        assert_eq!(snapshot.gres.len(), 1);
-        assert_eq!(snapshot.gres[0].utilization.gres_percent, 75);
+        let runtime = common::decode_runtime_payload(&decoded.payload).expect("runtime payload");
+        assert_eq!(runtime.gres.len(), 1);
+        assert_eq!(runtime.gres[0].utilization.gres_percent, 75);
     }
 
     #[test]
-    fn query_frame_with_mock_collector_returns_data_payload() {
+    fn query_frame_with_test_collector_returns_runtime_payload() {
         let ctx = context(Arc::new(TestGresCollector::new("node-a")));
         let request = request_frame(
             FrameType::QueryRequest,
@@ -306,14 +398,12 @@ mod tests {
 
         let response = ctx.handle_frame(&request).expect("handle query");
         let decoded = decode_transport_frame(&response).expect("decode response");
-        assert_eq!(decoded.header.frame_type, FrameType::DataPayload);
+        assert_eq!(decoded.header.frame_type, FrameType::RuntimePayload);
 
-        let snapshot = decode_snapshot_payload(&decoded.payload).expect("snapshot payload");
-        assert_eq!(snapshot.hostname, "node-a");
-        assert_eq!(snapshot.gres.len(), 1);
-        assert_eq!(snapshot.gres[0].utilization.gres_percent, 87);
-        assert_eq!(snapshot.gres[0].memory.used_mb, 1234);
-        assert_eq!(snapshot.gres[0].memory.total_mb, 16384);
+        let runtime = common::decode_runtime_payload(&decoded.payload).expect("runtime payload");
+        assert_eq!(runtime.gres.len(), 1);
+        assert_eq!(runtime.gres[0].utilization.gres_percent, 87);
+        assert_eq!(runtime.gres[0].memory_used_mb, 1234);
     }
 
     #[test]

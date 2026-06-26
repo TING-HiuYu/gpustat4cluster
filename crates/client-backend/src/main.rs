@@ -1,5 +1,3 @@
-#[cfg(feature = "kcp-transport")]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -8,14 +6,14 @@ use std::{
 mod adapter;
 mod cache;
 mod config;
+mod connection;
 mod discovery;
 mod filter;
-#[cfg(feature = "kcp-transport")]
-mod kcp_client;
 mod local_api;
 mod logger;
 mod tcp_client;
 mod transport;
+mod udp_client;
 
 fn main() {
     if let Err(e) = run() {
@@ -28,7 +26,6 @@ fn run() -> Result<(), String> {
     let config_path = config::get_config_path();
     let cfg = config::load_config(&config_path)?;
     let discover_wait = Duration::from_secs(cfg.connecting.discover_wait_secs);
-    let kcp_requested = kcp_enabled_requested(&cfg);
     let multicast_nodes = match discovery::discover_nodes(
         &cfg.connecting.multicast_addr,
         discover_wait,
@@ -50,14 +47,12 @@ fn run() -> Result<(), String> {
     };
 
     logger::info(format!(
-        "config_path={} protocol={} kcp={} discovery_multicast_addr={} static_node_count={} uds_path={} kcp_retry_limit={}",
+        "config_path={} protocol={} discovery_multicast_addr={} static_node_count={} uds_path={}",
         config_path.display(),
         cfg.connecting.protocol,
-        if kcp_requested { "enabled" } else { "disabled" },
         cfg.connecting.multicast_addr,
         static_nodes.len(),
-        local_api::uds_path_from_config_or_env(cfg.services.uds_path.as_deref()),
-        cfg.connecting.kcp_retry_limit
+        local_api::uds_path_from_config_or_env(cfg.services.uds_path.as_deref())
     ));
 
     if multicast_nodes.is_empty() && static_nodes.is_empty() {
@@ -73,26 +68,27 @@ fn run() -> Result<(), String> {
 
     let cache_map = cache::build_cache(discovered.clone());
     let shared = Arc::new(Mutex::new(cache_map));
+    let transport_protocol = cfg.connecting.protocol.trim().to_ascii_lowercase();
     let state = local_api::LocalApiState::new(
         shared,
         cfg.services.cache_ttl_ms,
-        kcp_requested,
+        transport_protocol,
+        cfg.connecting.udp_mtu,
         cfg.connecting.multicast_addr.clone(),
         discover_wait,
         Duration::from_secs(cfg.connecting.heartbeat_interval),
         Duration::from_secs(cfg.connecting.connection_idle_timeout),
         cfg.connecting.max_connections,
-        cfg.connecting.kcp_retry_limit as usize,
         cfg.connecting.multicast_outbound_ip.clone(),
     );
-    #[cfg(feature = "kcp-transport")]
-    if kcp_requested && !discovered.is_empty() {
+    if !discovered.is_empty() {
         let connect_state = state.clone();
-        std::thread::spawn(move || connect_state.establish_kcp_connections(&discovered));
-    }
-    #[cfg(feature = "kcp-transport")]
-    if kcp_requested {
-        install_signal_handler(state.clone());
+        let connect_nodes = discovered.clone();
+        if cfg.connecting.protocol.eq_ignore_ascii_case("tcp") {
+            std::thread::spawn(move || connect_state.establish_tcp_connections(&connect_nodes));
+        } else {
+            std::thread::spawn(move || connect_state.establish_udp_connections(&connect_nodes));
+        }
     }
     spawn_announce_listener(
         state.clone(),
@@ -101,21 +97,6 @@ fn run() -> Result<(), String> {
         cfg.connecting.protocol.clone(),
     );
     local_api::serve(state, cfg.services.uds_path.as_deref())
-}
-
-#[cfg(feature = "kcp-transport")]
-fn install_signal_handler(state: local_api::LocalApiState) {
-    static INSTALLED: AtomicBool = AtomicBool::new(false);
-    if INSTALLED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    if let Err(e) = ctrlc::set_handler(move || {
-        state.shutdown("client graceful shutdown: signal");
-        std::process::exit(0);
-    }) {
-        logger::warn(format!("signal handler disabled: {}", e));
-    }
 }
 
 fn spawn_announce_listener(
@@ -142,19 +123,16 @@ fn spawn_announce_listener(
                         node.hostname, node.addr
                     ));
                     state.add_discovered_nodes(std::slice::from_ref(&node));
-                    #[cfg(feature = "kcp-transport")]
-                    state.establish_kcp_connections(&[node]);
+                    if protocol.eq_ignore_ascii_case("tcp") {
+                        state.establish_tcp_connections(std::slice::from_ref(&node));
+                    }
+                    if protocol.eq_ignore_ascii_case("udp") {
+                        state.establish_udp_connections(std::slice::from_ref(&node));
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => logger::warn(format!("announce listener error: {}", e)),
             }
         }
     });
-}
-
-fn kcp_enabled_requested(cfg: &common::Config) -> bool {
-    let configured = cfg.connecting.protocol.eq_ignore_ascii_case("kcp");
-    std::env::var("GPUSTAT4CLUSTER_ENABLE_KCP")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
-        .unwrap_or(configured)
 }
