@@ -13,8 +13,8 @@ pub enum ErrorCode {
     PortExhausted = 1003,
     #[error("multicast setup failed")]
     MulticastFailed = 1004,
-    #[error("kcp initialization failed")]
-    KcpInitFailed = 1005,
+    #[error("transport initialization failed")]
+    TransportInitFailed = 1005,
     #[error("heartbeat timeout")]
     HeartbeatTimeout = 1006,
     #[error("connection closed")]
@@ -40,7 +40,7 @@ impl ErrorCode {
             1002 => Some(Self::ConfigInvalid),
             1003 => Some(Self::PortExhausted),
             1004 => Some(Self::MulticastFailed),
-            1005 => Some(Self::KcpInitFailed),
+            1005 => Some(Self::TransportInitFailed),
             1006 => Some(Self::HeartbeatTimeout),
             1007 => Some(Self::ConnectionClosed),
             1008 => Some(Self::QueryTimeout),

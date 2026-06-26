@@ -20,7 +20,7 @@ pub fn load_config(path: &Path) -> Result<Config, String> {
     let cfg: Config = toml::from_str(&raw)
         .map_err(|e| format!("parse config failed at {}: {}", path.display(), e))?;
     match cfg.connecting.protocol.trim().to_ascii_lowercase().as_str() {
-        "kcp" | "tcp" => {
+        "udp" | "tcp" => {
             if cfg.connecting.heartbeat_interval == 0 {
                 return Err("invalid connecting.heartbeat_interval: must be > 0".to_string());
             }
@@ -30,13 +30,10 @@ pub fn load_config(path: &Path) -> Result<Config, String> {
             if cfg.connecting.max_connections == 0 {
                 return Err("invalid connecting.max_connections: must be > 0".to_string());
             }
-            if cfg.connecting.kcp_retry_limit == 0 {
-                return Err("invalid connecting.kcp_retry_limit: must be > 0".to_string());
-            }
             Ok(cfg)
         }
         other => Err(format!(
-            "invalid connecting.protocol '{}': expected 'kcp' or 'tcp'",
+            "invalid connecting.protocol '{}': expected 'udp' or 'tcp'",
             other
         )),
     }

@@ -1,85 +1,59 @@
-#[cfg(feature = "kcp-transport")]
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
-#[cfg(feature = "kcp-transport")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::{adapter, cache::SharedCache, discovery, logger};
+use crate::{adapter, cache::SharedCache, connection::SharedServerConnection, discovery, logger};
 
 pub const DEFAULT_BACKEND_SOCKET: &str = "/run/gpustat4cluster/client.sock";
 pub const BACKEND_SOCKET_ENV: &str = "GPUSTAT4CLUSTER_BACKEND_SOCKET";
-#[cfg(feature = "kcp-transport")]
-const KCP_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 pub struct LocalApiState {
     cache: SharedCache,
-    #[cfg_attr(not(feature = "kcp-transport"), allow(dead_code))]
     cache_ttl_ms: u64,
-    kcp_enabled: bool,
+    transport_protocol: String,
+    udp_mtu: u16,
     discovery_multicast_addr: String,
     discover_wait: Duration,
-    #[cfg_attr(not(feature = "kcp-transport"), allow(dead_code))]
     heartbeat_interval: Duration,
     connection_idle_timeout: Duration,
-    #[cfg(feature = "kcp-transport")]
     max_connections: usize,
-    #[cfg(feature = "kcp-transport")]
-    kcp_retry_limit: usize,
     multicast_outbound_ip: Vec<String>,
-    #[cfg(feature = "kcp-transport")]
-    kcp_runtime: Arc<tokio::runtime::Runtime>,
-    #[cfg(feature = "kcp-transport")]
-    kcp_sessions: Arc<Mutex<HashMap<SocketAddr, crate::kcp_client::ConnectedKcpNode>>>,
-    #[cfg(feature = "kcp-transport")]
-    kcp_connecting: Arc<Mutex<HashSet<SocketAddr>>>,
+    connections: Arc<Mutex<HashMap<SocketAddr, SharedServerConnection>>>,
+    connecting: Arc<Mutex<HashSet<SocketAddr>>>,
 }
 
 impl LocalApiState {
     pub fn new(
         cache: SharedCache,
         cache_ttl_ms: u64,
-        kcp_enabled: bool,
+        transport_protocol: String,
+        udp_mtu: u16,
         discovery_multicast_addr: String,
         discover_wait: Duration,
         heartbeat_interval: Duration,
         connection_idle_timeout: Duration,
-        #[cfg_attr(not(feature = "kcp-transport"), allow(unused_variables))] max_connections: usize,
-        #[cfg_attr(not(feature = "kcp-transport"), allow(unused_variables))] kcp_retry_limit: usize,
+        max_connections: usize,
         multicast_outbound_ip: Vec<String>,
     ) -> Self {
         Self {
             cache,
             cache_ttl_ms,
-            kcp_enabled,
+            transport_protocol,
+            udp_mtu,
             discovery_multicast_addr,
             discover_wait,
             heartbeat_interval,
             connection_idle_timeout,
-            #[cfg(feature = "kcp-transport")]
             max_connections,
-            #[cfg(feature = "kcp-transport")]
-            kcp_retry_limit,
             multicast_outbound_ip,
-            #[cfg(feature = "kcp-transport")]
-            kcp_runtime: Arc::new(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_io()
-                    .enable_time()
-                    .worker_threads(max_connections.max(1))
-                    .thread_name("gpustat4cluster-client-kcp")
-                    .build()
-                    .expect("create client KCP runtime"),
-            ),
-            #[cfg(feature = "kcp-transport")]
-            kcp_sessions: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(feature = "kcp-transport")]
-            kcp_connecting: Arc::new(Mutex::new(HashSet::new())),
+            connections: Arc::new(Mutex::new(HashMap::new())),
+            connecting: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -93,6 +67,9 @@ impl LocalApiState {
         };
         let index_base = rows.len();
         for (idx, node) in nodes.iter().enumerate() {
+            if rows.values().any(|entry| entry.hostname == node.hostname) {
+                continue;
+            }
             let key = format!("{}-{}", node.addr.ip(), node.addr.port());
             rows.entry(key)
                 .or_insert_with(|| crate::cache::ConnectionCacheEntry {
@@ -109,34 +86,43 @@ impl LocalApiState {
         }
     }
 
-    #[cfg(feature = "kcp-transport")]
-    pub fn establish_kcp_connections(&self, nodes: &[discovery::DiscoveredNode]) {
-        if !self.kcp_enabled {
+    pub fn establish_tcp_connections(&self, nodes: &[discovery::DiscoveredNode]) {
+        if self.protocol() != "tcp" {
             return;
         }
+        self.establish_connections(nodes);
+    }
+
+    pub fn establish_udp_connections(&self, nodes: &[discovery::DiscoveredNode]) {
+        if self.protocol() != "udp" {
+            return;
+        }
+        self.establish_connections(nodes);
+    }
+
+    fn establish_connections(&self, nodes: &[discovery::DiscoveredNode]) {
         let index_base = self.cache.lock().map(|rows| rows.len()).unwrap_or(0);
         for (idx, node) in nodes.iter().enumerate() {
-            self.establish_one_kcp_connection(index_base + idx + 1, node.addr);
+            self.establish_one_connection(index_base + idx + 1, node.addr);
         }
     }
 
-    #[cfg(feature = "kcp-transport")]
-    fn establish_one_kcp_connection(&self, index: usize, addr: SocketAddr) {
-        let current_sessions = match self.kcp_sessions.lock() {
-            Ok(sessions) => {
-                if sessions.contains_key(&addr) {
+    fn establish_one_connection(&self, index: usize, addr: SocketAddr) {
+        let current_connections = match self.connections.lock() {
+            Ok(connections) => {
+                if connections.contains_key(&addr) {
                     return;
                 }
-                sessions.len()
+                connections.len()
             }
             Err(_) => {
-                logger::warn("kcp session lock poisoned");
+                logger::warn("connection pool lock poisoned");
                 return;
             }
         };
-        if current_sessions >= self.max_connections {
+        if current_connections >= self.max_connections {
             logger::transport_warn(
-                "kcp",
+                self.protocol(),
                 format!(
                     "event=max_connections_reached addr={} max_connections={}",
                     addr, self.max_connections
@@ -144,56 +130,58 @@ impl LocalApiState {
             );
             return;
         }
-        match self.kcp_connecting.lock() {
+
+        match self.connecting.lock() {
             Ok(mut connecting) => {
                 if !connecting.insert(addr) {
                     return;
                 }
             }
             Err(_) => {
-                logger::warn("kcp connecting lock poisoned");
+                logger::warn("connecting set lock poisoned");
                 return;
             }
         }
 
         let result = self.connect_with_retry(addr);
-        if let Ok(mut connecting) = self.kcp_connecting.lock() {
+        if let Ok(mut connecting) = self.connecting.lock() {
             connecting.remove(&addr);
         }
 
         match result {
-            Ok(node) => {
-                if let Ok(mut sessions) = self.kcp_sessions.lock() {
-                    if sessions.contains_key(&addr) {
-                        if let Err(e) =
-                            self.kcp_runtime
-                                .block_on(crate::kcp_client::disconnect_connected(
-                                    &node,
-                                    "client duplicate session",
-                                ))
-                        {
-                            logger::transport_warn(
-                                "kcp",
-                                format!("event=disconnect_failed addr={} error={}", addr, e),
-                            );
+            Ok(connection) => {
+                if let Ok(mut connections) = self.connections.lock() {
+                    if connections.contains_key(&addr) {
+                        let _ = connection.disconnect("client duplicate session");
+                        return;
+                    }
+                    if let Some(existing) = connections
+                        .values()
+                        .find(|existing| existing.hostname() == connection.hostname())
+                    {
+                        logger::transport_info(
+                            connection.protocol(),
+                            format!(
+                                "event=duplicate_host_ignored addr={} hostname={} existing_addr={}",
+                                connection.addr(),
+                                connection.hostname(),
+                                existing.addr()
+                            ),
+                        );
+                        let _ = connection.disconnect("client duplicate hostname");
+                        if let Ok(mut rows) = self.cache.lock() {
+                            rows.remove(&format!(
+                                "{}-{}",
+                                connection.addr().ip(),
+                                connection.addr().port()
+                            ));
                         }
                         return;
                     }
-                    if sessions.len() >= self.max_connections {
-                        if let Err(e) =
-                            self.kcp_runtime
-                                .block_on(crate::kcp_client::disconnect_connected(
-                                    &node,
-                                    "client max connections reached",
-                                ))
-                        {
-                            logger::transport_warn(
-                                "kcp",
-                                format!("event=disconnect_failed addr={} error={}", addr, e),
-                            );
-                        }
+                    if connections.len() >= self.max_connections {
+                        let _ = connection.disconnect("client max connections reached");
                         logger::transport_warn(
-                            "kcp",
+                            connection.protocol(),
                             format!(
                                 "event=max_connections_reached addr={} max_connections={}",
                                 addr, self.max_connections
@@ -201,150 +189,155 @@ impl LocalApiState {
                         );
                         return;
                     }
-                    sessions.insert(addr, node.clone());
+                    connections.insert(addr, Arc::clone(&connection));
                 } else {
-                    logger::warn("kcp session lock poisoned");
-                    if let Err(e) =
-                        self.kcp_runtime
-                            .block_on(crate::kcp_client::disconnect_connected(
-                                &node,
-                                "client session lock poisoned",
-                            ))
-                    {
-                        logger::transport_warn(
-                            "kcp",
-                            format!("event=disconnect_failed addr={} error={}", addr, e),
-                        );
-                    }
+                    logger::warn("connection pool lock poisoned");
+                    let _ = connection.disconnect("client connection pool lock poisoned");
                     return;
                 }
                 logger::transport_info(
-                    "kcp",
+                    connection.protocol(),
                     format!(
-                        "event=connected addr={} hostname={} gpu_num={} connection_count={}",
-                        addr,
-                        node.info.hostname,
-                        node.info.gpu_num,
-                        node.connection_count()
+                        "event=connected addr={} hostname={} gres_num={} connection_count={}",
+                        connection.addr(),
+                        connection.hostname(),
+                        connection.gres_num(),
+                        connection.connection_count()
                     ),
                 );
-                if let Ok(mut rows) = self.cache.lock() {
-                    crate::cache::upsert_handshake(
-                        &mut rows,
-                        format!("conn-{:03}", index),
-                        addr,
-                        &node.info,
-                    );
-                }
-                self.spawn_heartbeat(node);
+                self.upsert_connection_placeholder(index, &connection);
+                self.spawn_heartbeat(connection);
             }
             Err(e) => logger::transport_warn(
-                "kcp",
+                self.protocol(),
                 format!("event=connect_failed addr={} error={}", addr, e),
             ),
         }
     }
 
-    #[cfg(feature = "kcp-transport")]
-    fn connect_with_retry(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<crate::kcp_client::ConnectedKcpNode, crate::kcp_client::KcpClientError> {
-        let mut last_error = None;
-        for attempt in 1..=self.kcp_retry_limit {
-            match self
-                .kcp_runtime
-                .block_on(crate::kcp_client::connect_node_with_timeout(
-                    addr,
-                    self.connection_idle_timeout,
-                )) {
-                Ok(node) => return Ok(node),
-                Err(e) => {
-                    if attempt < self.kcp_retry_limit {
-                        logger::transport_warn(
-                            "kcp",
-                            format!(
-                                "event=connect_retry addr={} attempt={} error={}",
-                                addr, attempt, e
-                            ),
-                        );
-                        std::thread::sleep(KCP_CONNECT_RETRY_DELAY);
-                    }
-                    last_error = Some(e);
-                }
-            }
+    fn connect_with_retry(&self, addr: SocketAddr) -> Result<SharedServerConnection, String> {
+        if self.protocol() == "udp" {
+            return crate::udp_client::connect_node(
+                addr,
+                self.connection_idle_timeout,
+                self.udp_mtu,
+            )
+            .map(|node| Arc::new(node) as SharedServerConnection)
+            .map_err(|e| e.to_string());
         }
-        Err(last_error.expect("at least one KCP connect attempt"))
+
+        if self.protocol() == "tcp" {
+            return crate::tcp_client::connect_node(addr, self.connection_idle_timeout)
+                .map(|node| Arc::new(node) as SharedServerConnection)
+                .map_err(|e| e.to_string());
+        }
+
+        Err(format!("unsupported protocol: {}", self.protocol()))
     }
 
-    #[cfg(feature = "kcp-transport")]
-    fn spawn_heartbeat(&self, node: crate::kcp_client::ConnectedKcpNode) {
+    fn protocol(&self) -> &'static str {
+        match self.transport_protocol.as_str() {
+            "udp" => "udp",
+            "tcp" => "tcp",
+            _ => "udp",
+        }
+    }
+
+    fn upsert_connection_placeholder(&self, index: usize, connection: &SharedServerConnection) {
+        if let Ok(mut rows) = self.cache.lock() {
+            let addr = connection.addr();
+            let key = format!("{}-{}", addr.ip(), addr.port());
+            rows.entry(key)
+                .and_modify(|entry| {
+                    entry.connection_id = format!("conn-{:03}", index);
+                    entry.hostname = connection.hostname();
+                    entry.num = connection.gres_num();
+                })
+                .or_insert_with(|| crate::cache::ConnectionCacheEntry {
+                    connection_id: format!("conn-{:03}", index),
+                    hostname: connection.hostname(),
+                    num: connection.gres_num(),
+                    server_gres: Vec::new(),
+                    record_timestamp: now_ms(),
+                    addr,
+                    last_snapshot: None,
+                    last_error: None,
+                    last_query_latency_us: None,
+                });
+        }
+    }
+
+    fn spawn_heartbeat(&self, connection: SharedServerConnection) {
+        if !connection.wants_heartbeat() {
+            return;
+        }
         let interval = self.heartbeat_interval;
         if interval.is_zero() {
             return;
         }
         let cache = Arc::clone(&self.cache);
-        let sessions = Arc::clone(&self.kcp_sessions);
-        self.kcp_runtime.spawn(async move {
-            loop {
-                tokio::time::sleep(interval).await;
-                if let Err(e) = crate::kcp_client::heartbeat_connected(&node).await {
-                    crate::kcp_client::close_connected(&node);
-                    logger::transport_warn(
-                        "kcp",
-                        format!(
-                            "event=disconnected addr={} hostname={} error={}",
-                            node.addr, node.info.hostname, e
-                        ),
-                    );
-                    if let Ok(mut sessions) = sessions.lock() {
-                        sessions.remove(&node.addr);
-                    }
-                    if let Ok(mut rows) = cache.lock() {
-                        let connection_id = rows
-                            .values()
-                            .find(|entry| entry.addr == node.addr)
-                            .map(|entry| entry.connection_id.clone())
-                            .unwrap_or_else(|| "conn-unknown".to_string());
-                        crate::cache::mark_stale(
-                            &mut rows,
-                            connection_id,
-                            node.addr,
-                            node.info.hostname.clone(),
-                            e.to_string(),
-                        );
-                    }
-                    break;
+        let connections = Arc::clone(&self.connections);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(interval);
+            if let Err(e) = connection.heartbeat() {
+                connection.close();
+                logger::transport_warn(
+                    connection.protocol(),
+                    format!(
+                        "event=disconnected addr={} hostname={} error={}",
+                        connection.addr(),
+                        connection.hostname(),
+                        e
+                    ),
+                );
+                if let Ok(mut connections) = connections.lock() {
+                    connections.remove(&connection.addr());
                 }
+                if let Ok(mut rows) = cache.lock() {
+                    let connection_id = rows
+                        .values()
+                        .find(|entry| entry.addr == connection.addr())
+                        .map(|entry| entry.connection_id.clone())
+                        .unwrap_or_else(|| "conn-unknown".to_string());
+                    crate::cache::mark_stale(
+                        &mut rows,
+                        connection_id,
+                        connection.addr(),
+                        connection.hostname(),
+                        e,
+                    );
+                }
+                break;
             }
         });
     }
 
-    #[cfg(feature = "kcp-transport")]
+    #[allow(dead_code)]
     pub fn shutdown(&self, reason: &str) {
-        let sessions = self
-            .kcp_sessions
+        let connections = self
+            .connections
             .lock()
-            .map(|sessions| sessions.values().cloned().collect::<Vec<_>>())
+            .map(|connections| connections.values().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
 
-        for node in sessions {
+        for connection in connections {
             logger::transport_info(
-                "kcp",
+                connection.protocol(),
                 format!(
                     "event=disconnect_send addr={} hostname={} reason={}",
-                    node.addr, node.info.hostname, reason
+                    connection.addr(),
+                    connection.hostname(),
+                    reason
                 ),
             );
-            if let Err(e) = self
-                .kcp_runtime
-                .block_on(crate::kcp_client::disconnect_connected(&node, reason))
-            {
+            if let Err(e) = connection.disconnect(reason) {
                 logger::transport_warn(
-                    "kcp",
+                    connection.protocol(),
                     format!(
                         "event=disconnect_failed addr={} hostname={} error={}",
-                        node.addr, node.info.hostname, e
+                        connection.addr(),
+                        connection.hostname(),
+                        e
                     ),
                 );
             }
@@ -432,6 +425,22 @@ where
 }
 
 pub(crate) fn handle_command(cmd: &str, state: &LocalApiState) -> Result<String, String> {
+    #[cfg(test)]
+    if cmd == "TEST_GRES_SCHEMA" {
+        return Ok("OK schema=gres\n".to_string());
+    }
+
+    #[cfg(test)]
+    if cmd == "TEST_CACHE_KEYS" {
+        let rows = state
+            .cache
+            .lock()
+            .map_err(|_| "cache lock poisoned".to_string())?;
+        let mut keys: Vec<_> = rows.keys().cloned().collect();
+        keys.sort();
+        return Ok(format!("{}\n", keys.join(",")));
+    }
+
     if cmd == "LIST" {
         let rows = state
             .cache
@@ -482,7 +491,7 @@ fn ensure_nodes_available_for_query(state: &LocalApiState) -> Result<(), String>
         &state.discovery_multicast_addr,
         state.discover_wait,
         &state.multicast_outbound_ip,
-        if state.kcp_enabled { "kcp" } else { "tcp" },
+        state.protocol(),
     ) {
         Ok(nodes) => nodes,
         Err(e) => {
@@ -517,48 +526,42 @@ fn ensure_nodes_available_for_query(state: &LocalApiState) -> Result<(), String>
     Ok(())
 }
 
-#[cfg(feature = "kcp-transport")]
 fn refresh_stale_cache_for_query(state: &LocalApiState) -> Result<(), String> {
-    if !state.kcp_enabled {
-        return refresh_stale_cache_for_query_tcp(state);
-    }
-
     let targets = stale_targets(&state.cache, state.cache_ttl_ms)?;
     if targets.is_empty() {
         return Ok(());
     }
 
     for target in targets {
-        let session = state
-            .kcp_sessions
+        let connection = state
+            .connections
             .lock()
-            .map_err(|_| "kcp session lock poisoned".to_string())?
+            .map_err(|_| "connection pool lock poisoned".to_string())?
             .get(&target.addr)
             .cloned();
-        let session = match session {
-            Some(session) => session,
+        let connection = match connection {
+            Some(connection) => connection,
             None => {
                 let node = discovery::DiscoveredNode {
                     hostname: target.hostname.clone(),
                     addr: target.addr,
                     ts_ms: now_ms(),
                 };
-                state.establish_kcp_connections(&[node]);
+                state.establish_connections(&[node]);
                 state
-                    .kcp_sessions
+                    .connections
                     .lock()
-                    .map_err(|_| "kcp session lock poisoned".to_string())?
+                    .map_err(|_| "connection pool lock poisoned".to_string())?
                     .get(&target.addr)
                     .cloned()
-                    .ok_or_else(|| format!("no KCP session for {}", target.addr))?
+                    .ok_or_else(|| {
+                        format!("no {} connection for {}", state.protocol(), target.addr)
+                    })?
             }
         };
 
         let query_started = std::time::Instant::now();
-        match state
-            .kcp_runtime
-            .block_on(crate::kcp_client::query_connected(&session))
-        {
+        match connection.query(state.connection_idle_timeout) {
             Ok(snapshot) => {
                 let latency_us = query_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
                 let mut rows = state
@@ -574,10 +577,10 @@ fn refresh_stale_cache_for_query(state: &LocalApiState) -> Result<(), String> {
                 );
             }
             Err(e) => {
-                crate::kcp_client::close_connected(&session);
+                connection.close();
                 if target.had_snapshot {
                     logger::transport_warn(
-                        "kcp",
+                        connection.protocol(),
                         format!(
                             "event=disconnected addr={} hostname={} error={}",
                             target.addr, target.hostname, e
@@ -585,100 +588,16 @@ fn refresh_stale_cache_for_query(state: &LocalApiState) -> Result<(), String> {
                     );
                 } else {
                     logger::transport_warn(
-                        "kcp",
+                        connection.protocol(),
                         format!(
                             "event=query_failed addr={} hostname={} error={}",
                             target.addr, target.hostname, e
                         ),
                     );
                 }
-                if let Ok(mut sessions) = state.kcp_sessions.lock() {
-                    sessions.remove(&target.addr);
+                if let Ok(mut connections) = state.connections.lock() {
+                    connections.remove(&target.addr);
                 }
-                let mut rows = state
-                    .cache
-                    .lock()
-                    .map_err(|_| "cache lock poisoned".to_string())?;
-                crate::cache::mark_stale(
-                    &mut rows,
-                    target.connection_id,
-                    target.addr,
-                    target.hostname,
-                    e.to_string(),
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "kcp-transport"))]
-fn refresh_stale_cache_for_query(state: &LocalApiState) -> Result<(), String> {
-    if state.kcp_enabled {
-        logger::warn("KCP requested but this binary was built without kcp-transport");
-        return Ok(());
-    }
-    refresh_stale_cache_for_query_tcp(state)
-}
-
-fn refresh_stale_cache_for_query_tcp(state: &LocalApiState) -> Result<(), String> {
-    let targets = stale_targets(&state.cache, state.cache_ttl_ms)?;
-    if targets.is_empty() {
-        return Ok(());
-    }
-
-    for target in targets {
-        let query_started = std::time::Instant::now();
-        match crate::tcp_client::query_node(target.addr, state.connection_idle_timeout) {
-            Ok(snapshot) => {
-                let latency_us = query_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
-                let hostname = snapshot.hostname.clone();
-                let gpu_num = snapshot.gres.len();
-                if !target.had_snapshot {
-                    logger::transport_info(
-                        "tcp",
-                        format!(
-                            "event=connected addr={} hostname={} gpu_num={} latency_us={}",
-                            target.addr, hostname, gpu_num, latency_us
-                        ),
-                    );
-                } else if target.had_error {
-                    logger::transport_info(
-                        "tcp",
-                        format!(
-                            "event=reconnected addr={} hostname={} gpu_num={} latency_us={}",
-                            target.addr, hostname, gpu_num, latency_us
-                        ),
-                    );
-                } else {
-                    logger::transport_info(
-                        "tcp",
-                        format!(
-                            "event=query_ok addr={} hostname={} gpu_num={} latency_us={}",
-                            target.addr, hostname, gpu_num, latency_us
-                        ),
-                    );
-                }
-                let mut rows = state
-                    .cache
-                    .lock()
-                    .map_err(|_| "cache lock poisoned".to_string())?;
-                crate::cache::upsert_snapshot(
-                    &mut rows,
-                    target.connection_id,
-                    target.addr,
-                    snapshot,
-                    Some(latency_us),
-                );
-            }
-            Err(e) => {
-                logger::transport_warn(
-                    "tcp",
-                    format!(
-                        "event=query_failed addr={} hostname={} error={}",
-                        target.addr, target.hostname, e
-                    ),
-                );
                 let mut rows = state
                     .cache
                     .lock()
@@ -697,16 +616,13 @@ fn refresh_stale_cache_for_query_tcp(state: &LocalApiState) -> Result<(), String
 }
 
 #[derive(Debug)]
-#[cfg_attr(not(feature = "kcp-transport"), allow(dead_code))]
 struct RefreshTarget {
     connection_id: String,
     hostname: String,
     addr: SocketAddr,
     had_snapshot: bool,
-    had_error: bool,
 }
 
-#[cfg_attr(not(feature = "kcp-transport"), allow(dead_code))]
 fn stale_targets(cache: &SharedCache, cache_ttl_ms: u64) -> Result<Vec<RefreshTarget>, String> {
     let now = now_ms();
     let rows = cache
@@ -723,12 +639,10 @@ fn stale_targets(cache: &SharedCache, cache_ttl_ms: u64) -> Result<Vec<RefreshTa
             hostname: entry.hostname.clone(),
             addr: entry.addr,
             had_snapshot: entry.last_snapshot.is_some(),
-            had_error: entry.last_error.is_some(),
         })
         .collect())
 }
 
-#[cfg_attr(not(feature = "kcp-transport"), allow(dead_code))]
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -744,14 +658,14 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    fn kcp_cache() -> SharedCache {
+    fn sample_cache() -> SharedCache {
         let mut rows: CacheMap = HashMap::new();
         upsert_snapshot(
             &mut rows,
             "conn-001",
             "127.0.0.1:30000".parse().unwrap(),
             ServerGresSnapshot {
-                hostname: "kcp-node".to_string(),
+                hostname: "sample-node".to_string(),
                 driver_version: None,
                 gres: vec![GresInfo {
                     index: 0,
@@ -783,22 +697,22 @@ mod tests {
         LocalApiState::new(
             cache,
             40,
-            false,
+            "udp".to_string(),
+            0,
             "239.0.0.1:4000".to_string(),
             Duration::from_millis(1),
             Duration::from_secs(5),
             Duration::from_secs(10),
             2,
-            3,
             Vec::new(),
         )
     }
 
     #[test]
-    fn query_response_includes_kcp_snapshot_node() {
-        let response = handle_command("QUERY {}", &state(kcp_cache())).expect("query response");
+    fn query_response_includes_snapshot_node() {
+        let response = handle_command("QUERY {}", &state(sample_cache())).expect("query response");
         assert!(response.contains("\"meta\""));
-        assert!(response.contains("kcp-node"));
+        assert!(response.contains("sample-node"));
         assert!(response.contains("\"util\":66"));
         assert!(response.contains("\"uid\":1000"));
     }
@@ -814,8 +728,22 @@ mod tests {
     }
 
     #[test]
-    fn list_response_includes_kcp_snapshot_node() {
-        let response = handle_command("LIST", &state(kcp_cache())).expect("list response");
-        assert!(response.contains("conn-001 kcp-node 127.0.0.1:30000 "));
+    fn list_response_includes_snapshot_node() {
+        let response = handle_command("LIST", &state(sample_cache())).expect("list response");
+        assert!(response.contains("conn-001 sample-node 127.0.0.1:30000 "));
+    }
+
+    #[test]
+    fn test_endpoint_reports_gres_schema() {
+        let response =
+            handle_command("TEST_GRES_SCHEMA", &state(sample_cache())).expect("test response");
+        assert_eq!(response, "OK schema=gres\n");
+    }
+
+    #[test]
+    fn test_endpoint_lists_cache_keys() {
+        let response =
+            handle_command("TEST_CACHE_KEYS", &state(sample_cache())).expect("test response");
+        assert_eq!(response, "127.0.0.1-30000\n");
     }
 }
