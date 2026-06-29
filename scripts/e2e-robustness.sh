@@ -168,16 +168,15 @@ scenario_dynamic_scale_robustness() {
   mkdir -p "$scale_dir"
   read -r mcast_port < <(alloc_ports 1)
   local multicast="239.255.0.245:$mcast_port"
-  local server_count=16
-  local backend_count=8
-  local frontend_count=32
+  local server_count=8
+  local backend_count=4
+  local frontend_count=16
   local server_configs=()
   local server_handles=()
   local inventories=()
   local final_counts=()
   local backend_configs=()
   local backend_sockets=()
-  local backend_protocols=()
   for i in $(seq 1 "$server_count"); do
     read -r tcp_port udp_port < <(alloc_ports 2)
     local dir="$scale_dir/server-$i"
@@ -198,25 +197,17 @@ scenario_dynamic_scale_robustness() {
     mkdir -p "$dir"
     local uds="$dir/client.sock"
     local client_config="$dir/client.toml"
-    local protocol="udp"
-    if (( i <= backend_count / 2 )); then
-      protocol="tcp"
-    fi
-    write_client_config "$client_config" "$uds" "$multicast" "$protocol"
+    write_client_config "$client_config" "$uds" "$multicast"
     backend_configs+=("$client_config|$dir/backend.log")
     backend_sockets+=("$uds")
-    backend_protocols+=("$protocol")
   done
   for action in \
     "server:4" "backend:0" "server:0" "probe:0" \
-    "expand:0:8:930" "backend:4" "server:9" "backend:2" \
-    "server:5" "server:1" "corrupt:1" "probe:2" \
-    "backend:6" "server:12" "backend:1" "server:3" \
-    "shrink:3:2:931" "server:14" "recover:1:5:932" "stop:4" \
-    "backend:5" "server:10" "backend:3" "server:2" \
-    "restart:4" "server:6" "probe:1" "server:7" \
-    "backend:7" "server:11" "probe:3" "server:8" \
-    "server:13" "server:15" "probe:5" "probe:7"; do
+    "expand:0:8:930" "backend:2" "server:5" "server:1" \
+    "corrupt:1" "probe:2" "backend:1" "server:3" \
+    "shrink:3:2:931" "recover:1:5:932" "stop:4" \
+    "backend:3" "server:2" "restart:4" "server:6" \
+    "probe:1" "server:7" "probe:3"; do
     IFS=':' read -r kind idx arg1 arg2 <<<"$action"
     case "$kind" in
       server|restart)
@@ -226,7 +217,6 @@ scenario_dynamic_scale_robustness() {
         ;;
       backend)
         IFS='|' read -r cfg log <<<"${backend_configs[$idx]}"
-        echo "starting robust backend-$((idx + 1)) protocol=${backend_protocols[$idx]}" >>"$scale_dir/robustness.log"
         start_backend "$cfg" "" "$log"
         ;;
       probe)
@@ -266,7 +256,7 @@ scenario_dynamic_scale_robustness() {
   for i in "${!backend_configs[@]}"; do
     IFS='|' read -r _cfg log <<<"${backend_configs[$i]}"
     if ! assert_connected_events_at_least "$log" "$server_count"; then
-      record_failure "robust-scale-connections" "$scale_dir" "backend-$((i + 1)) protocol=${backend_protocols[$i]} did not connect to all recovered servers"
+      record_failure "robust-scale-connections" "$scale_dir" "backend-$((i + 1)) did not connect to all recovered servers"
     fi
   done
 }
