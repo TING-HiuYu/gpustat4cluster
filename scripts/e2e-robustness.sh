@@ -274,12 +274,13 @@ scenario_dynamic_scale_robustness() {
 scenario_exception_matrix() {
   local matrix_dir="$E2E_TMP_ROOT/robust-exception-matrix"
   mkdir -p "$matrix_dir"
-  read -r mcast_port < <(alloc_ports 1)
-  local multicast="239.255.0.246:$mcast_port"
   local groups=4
   for g in $(seq 0 $((groups - 1))); do
     local dir="$matrix_dir/group-$g"
     mkdir -p "$dir"
+    local mcast_port multicast
+    read -r mcast_port < <(alloc_ports 1)
+    multicast="239.255.0.$((246 - g)):$mcast_port"
     local server_configs=() server_handles=() inventories=() alive=()
     local backend_configs=() backend_sockets=() backend_handles=()
     # Event structure template: side,event,change.tcp,change.udp,change.gres-function.

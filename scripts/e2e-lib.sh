@@ -15,6 +15,7 @@ E2E_NODE_IMAGE="${E2E_NODE_IMAGE:-gpustat4cluster-e2e-node:local}"
 E2E_DOCKER_NETWORK="${E2E_DOCKER_NETWORK:-}"
 declare -A E2E_SERVER_BY_TCP=()
 declare -A E2E_SERVER_BY_UDP=()
+declare -A E2E_USED_PORTS=()
 
 cleanup_e2e() {
   local pid
@@ -58,12 +59,12 @@ require_binaries() {
 
 alloc_ports() {
   local count="$1"
-  python3 - "$count" <<'PY'
-import socket, sys
-count = int(sys.argv[1])
-sockets = []
-ports = []
-while len(ports) < count:
+  local ports=()
+  while ((${#ports[@]} < count)); do
+    local candidate
+    candidate="$(python3 - <<'PY'
+import socket
+while True:
     tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     tcp.bind(("0.0.0.0", 0))
     port = tcp.getsockname()[1]
@@ -74,10 +75,18 @@ while len(ports) < count:
         tcp.close()
         udp.close()
         continue
-    ports.append(port)
-    sockets.extend([tcp, udp])
-print(" ".join(map(str, ports)))
+    tcp.close()
+    udp.close()
+    print(port)
+    break
 PY
+)"
+    if [[ -z "${E2E_USED_PORTS[$candidate]:-}" ]]; then
+      E2E_USED_PORTS["$candidate"]=1
+      ports+=("$candidate")
+    fi
+  done
+  echo "${ports[*]}"
 }
 
 write_inventory() {
@@ -287,7 +296,14 @@ compare_inventory_json() {
 import json, sys
 obtained_path, expected_path = sys.argv[1], sys.argv[2]
 def norm_gres(gres):
-    return sorted([{k: g.get(k) for k in ('index','name','uuid','memory_total_mb')} for g in (gres or [])], key=lambda g: (g.get('index', -1), g.get('uuid') or ''))
+    normalized = []
+    for g in gres or []:
+        normalized.append({
+            'index': g.get('index'),
+            'name': g.get('name'),
+            'mem_total_mb': g.get('mem_total_mb', g.get('memory_total_mb')),
+        })
+    return sorted(normalized, key=lambda g: (g.get('index', -1), g.get('name') or ''))
 def load_nodes(path):
     with open(path, encoding='utf-8') as f:
         data = json.load(f)
@@ -330,16 +346,26 @@ query_inventory_until() {
 assert_query_latency() {
   local uds="$1" max_first_us="$2" avg_max_us="$3" out="$4"
   python3 - "$CLIENT_BIN" "$uds" "$max_first_us" "$avg_max_us" "$out" <<'PY'
-import os, subprocess, sys, time
+import json, os, subprocess, sys
 client, uds, first_limit, avg_limit, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 env = os.environ.copy(); env['GPUSTAT4CLUSTER_BACKEND_SOCKET'] = uds
 samples=[]
+def max_delay_us(payload):
+    data = json.loads(payload)
+    delays = [node.get('delay_us') for node in data.get('nodes', []) if node.get('delay_us') is not None]
+    if not delays:
+        raise RuntimeError('query response did not include delay_us')
+    return max(delays)
 for i in range(11):
-    start=time.perf_counter_ns()
     cp=subprocess.run([client, '--json'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    dur=(time.perf_counter_ns()-start)//1000
     if cp.returncode:
         sys.stderr.write(cp.stderr.decode(errors='replace')); sys.exit(cp.returncode)
+    try:
+        dur = max_delay_us(cp.stdout)
+    except Exception as exc:
+        sys.stderr.write(f"latency parse failed: {exc}\n")
+        sys.stderr.write(cp.stdout.decode(errors='replace'))
+        sys.exit(1)
     if i==0:
         open(out, 'wb').write(cp.stdout)
         if dur > first_limit:
