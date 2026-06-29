@@ -315,7 +315,7 @@ impl LocalApiState {
         });
     }
 
-    #[allow(dead_code)]
+    #[cfg(feature = "test-api")]
     pub fn shutdown(&self, reason: &str) {
         let connections = self
             .connections
@@ -474,6 +474,18 @@ pub(crate) fn handle_command(cmd: &str, state: &LocalApiState) -> Result<String,
         let json =
             serde_json::to_string(&resp).map_err(|e| format!("encode response failed: {}", e))?;
         return Ok(format!("{}\n", json));
+    }
+
+    #[cfg(feature = "test-api")]
+    if let Some(reason) = cmd.strip_prefix("SHUTDOWN") {
+        let reason = reason.trim();
+        let reason = if reason.is_empty() {
+            "client backend shutdown"
+        } else {
+            reason
+        };
+        state.shutdown(reason);
+        return Ok("OK shutdown\n".to_string());
     }
 
     Ok(format!("ERR unsupported command: {}\n", cmd))

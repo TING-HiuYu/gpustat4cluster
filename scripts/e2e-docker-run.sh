@@ -10,6 +10,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$1"
 RUNNER_IMAGE="${E2E_RUNNER_IMAGE:-gpustat4cluster-e2e-runner:local}"
 RUN_ID="${E2E_RUN_ID:-g4c-$(date +%s)-$$}"
+E2E_SERVER_BIN="${SERVER_BIN:-/tmp/gpustat4cluster-target/release/server}"
+E2E_BACKEND_BIN="${BACKEND_BIN:-/tmp/gpustat4cluster-target/release/gpustat4cluster-client-backend}"
+E2E_CLIENT_BIN="${CLIENT_BIN:-/tmp/gpustat4cluster-target/release/gpustat4cluster}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is required to run containerized e2e tests" >&2
@@ -27,10 +30,13 @@ docker run --rm --privileged \
   -e E2E_NODE_MODE=docker \
   -e E2E_RUN_ID="$RUN_ID" \
   -e E2E_NODE_IMAGE="gpustat4cluster-e2e-node:local" \
-  -e CARGO_TARGET_DIR="/tmp/gpustat4cluster-target" \
-  -e SERVER_BIN="/tmp/gpustat4cluster-target/debug/server" \
-  -e BACKEND_BIN="/tmp/gpustat4cluster-target/debug/gpustat4cluster-client-backend" \
-  -e CLIENT_BIN="/tmp/gpustat4cluster-target/debug/gpustat4cluster" \
+  -e CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/gpustat4cluster-target}" \
+  -e E2E_SKIP_BUILD="${E2E_SKIP_BUILD:-0}" \
+  -e SERVER_BIN="$E2E_SERVER_BIN" \
+  -e BACKEND_BIN="$E2E_BACKEND_BIN" \
+  -e CLIENT_BIN="$E2E_CLIENT_BIN" \
+  -e E2E_PROTOCOL="${E2E_PROTOCOL:-}" \
+  -e E2E_ROBUSTNESS_GROUP="${E2E_ROBUSTNESS_GROUP:-}" \
   "$RUNNER_IMAGE" \
   -lc '
     set -euo pipefail

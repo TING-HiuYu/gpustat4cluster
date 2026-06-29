@@ -55,6 +55,22 @@ jobs:
       - name: Build test-collector server binary
         run: cargo build --locked -p server --features test-collector --no-default-features
 
+      - name: Build e2e test binaries
+        run: |
+          cargo build --locked --release -p server --features test-collector --no-default-features
+          cargo build --locked --release -p gpustat4cluster-client-backend --features test-api
+          cargo build --locked --release -p gpustat4cluster-client-cli
+          mkdir -p e2e-bin
+          cp target/release/server e2e-bin/server
+          cp target/release/gpustat4cluster-client-backend e2e-bin/gpustat4cluster-client-backend
+          cp target/release/gpustat4cluster e2e-bin/gpustat4cluster
+
+      - name: Upload e2e test binaries
+        uses: actions/upload-artifact@v5
+        with:
+          name: e2e-test-binaries
+          path: e2e-bin/*
+
   e2e-basic-tests:
     name: ${{ matrix.name }}
     needs: cargo-test
@@ -91,8 +107,22 @@ jobs:
         with:
           ref: ${{ inputs.commit_target }}
 
+      - name: Download e2e test binaries
+        uses: actions/download-artifact@v5
+        with:
+          name: e2e-test-binaries
+          path: e2e-bin
+
+      - name: Prepare e2e test binaries
+        run: chmod +x e2e-bin/*
+
       - name: Run ${{ matrix.name }}
-        run: scripts/e2e-docker-run.sh ${{ matrix.script }}
+        run: |
+          E2E_SKIP_BUILD=1 \
+          SERVER_BIN=/work/e2e-bin/server \
+          BACKEND_BIN=/work/e2e-bin/gpustat4cluster-client-backend \
+          CLIENT_BIN=/work/e2e-bin/gpustat4cluster \
+          scripts/e2e-docker-run.sh ${{ matrix.script }}
 
   e2e-dynamic-scale:
     name: e2e dynamic scale ${{ matrix.protocol }}
@@ -116,14 +146,37 @@ jobs:
         with:
           ref: ${{ inputs.commit_target }}
 
+      - name: Download e2e test binaries
+        uses: actions/download-artifact@v5
+        with:
+          name: e2e-test-binaries
+          path: e2e-bin
+
+      - name: Prepare e2e test binaries
+        run: chmod +x e2e-bin/*
+
       - name: Run e2e dynamic scale ${{ matrix.protocol }}
-        run: E2E_PROTOCOL=${{ matrix.protocol }} scripts/e2e-docker-run.sh scripts/e2e-dynamic-scale.sh
+        run: |
+          E2E_PROTOCOL=${{ matrix.protocol }} \
+          E2E_SKIP_BUILD=1 \
+          SERVER_BIN=/work/e2e-bin/server \
+          BACKEND_BIN=/work/e2e-bin/gpustat4cluster-client-backend \
+          CLIENT_BIN=/work/e2e-bin/gpustat4cluster \
+          scripts/e2e-docker-run.sh scripts/e2e-dynamic-scale.sh
 
   e2e-robustness:
-    name: e2e robustness mixed tcp udp
+    name: e2e robustness mixed tcp udp group ${{ matrix.group }}
     needs: e2e-dynamic-scale
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - 0
+          - 1
+          - 2
+          - 3
     steps:
       - name: Checkout push target
         if: github.event_name != 'workflow_dispatch'
@@ -135,5 +188,20 @@ jobs:
         with:
           ref: ${{ inputs.commit_target }}
 
-      - name: Run e2e robustness udp
-        run: scripts/e2e-docker-run.sh scripts/e2e-robustness.sh
+      - name: Download e2e test binaries
+        uses: actions/download-artifact@v5
+        with:
+          name: e2e-test-binaries
+          path: e2e-bin
+
+      - name: Prepare e2e test binaries
+        run: chmod +x e2e-bin/*
+
+      - name: Run e2e robustness group ${{ matrix.group }}
+        run: |
+          E2E_ROBUSTNESS_GROUP=${{ matrix.group }} \
+          E2E_SKIP_BUILD=1 \
+          SERVER_BIN=/work/e2e-bin/server \
+          BACKEND_BIN=/work/e2e-bin/gpustat4cluster-client-backend \
+          CLIENT_BIN=/work/e2e-bin/gpustat4cluster \
+          scripts/e2e-docker-run.sh scripts/e2e-robustness.sh

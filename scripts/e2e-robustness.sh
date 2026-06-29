@@ -63,13 +63,15 @@ scenario_expand_inventory() {
   sleep 1
   start_backend "$client_config" "127.0.0.1:$udp_port" "$dir/backend.log"
   wait_for_socket "$uds"
-  if ! query_until "$uds" 1 6 "$dir/query-initial.json"; then
+  write_expected_manifest "$dir/expected-initial.json" "$inventory"
+  if ! query_inventory_until "$uds" "$dir/expected-initial.json" "$dir/query-initial.json"; then
     record_failure "robust-expand-initial" "$dir" "initial 6-GRES query failed"
     return
   fi
   write_inventory_count "$inventory" "node-$name" 8 302 >/dev/null
   sleep 1
-  if ! query_until "$uds" 1 8 "$dir/query-expanded.json"; then
+  write_expected_manifest "$dir/expected-expanded.json" "$inventory"
+  if ! query_inventory_until "$uds" "$dir/expected-expanded.json" "$dir/query-expanded.json"; then
     record_failure "robust-expand-stale-shape" "$dir" "inventory changed 6 -> 8, but frontend did not observe 8 GRES after TTL expiry"
   fi
 }
@@ -81,13 +83,15 @@ scenario_shrink_inventory() {
   sleep 1
   start_backend "$client_config" "127.0.0.1:$udp_port" "$dir/backend.log"
   wait_for_socket "$uds"
-  if ! query_until "$uds" 1 8 "$dir/query-initial.json"; then
+  write_expected_manifest "$dir/expected-initial.json" "$inventory"
+  if ! query_inventory_until "$uds" "$dir/expected-initial.json" "$dir/query-initial.json"; then
     record_failure "robust-shrink-initial" "$dir" "initial 8-GRES query failed"
     return
   fi
   write_inventory_count "$inventory" "node-$name" 4 402 >/dev/null
   sleep 1
-  if ! query_until "$uds" 1 4 "$dir/query-shrunk.json"; then
+  write_expected_manifest "$dir/expected-shrunk.json" "$inventory"
+  if ! query_inventory_until "$uds" "$dir/expected-shrunk.json" "$dir/query-shrunk.json"; then
     record_failure "robust-shrink-stale-shape" "$dir" "inventory changed 8 -> 4, but frontend did not observe 4 GRES after TTL expiry"
   fi
 }
@@ -99,7 +103,8 @@ scenario_metadata_reload() {
   sleep 1
   start_backend "$client_config" "127.0.0.1:$udp_port" "$dir/backend.log"
   wait_for_socket "$uds"
-  if ! query_until "$uds" 1 4 "$dir/query-initial.json"; then
+  write_expected_manifest "$dir/expected-initial.json" "$inventory"
+  if ! query_inventory_until "$uds" "$dir/expected-initial.json" "$dir/query-initial.json"; then
     record_failure "robust-metadata-initial" "$dir" "initial metadata query failed"
     return
   fi
@@ -117,7 +122,8 @@ scenario_collector_error_recovery() {
   sleep 1
   start_backend "$client_config" "127.0.0.1:$udp_port" "$dir/backend.log"
   wait_for_socket "$uds"
-  if ! query_until "$uds" 1 4 "$dir/query-initial.json"; then
+  write_expected_manifest "$dir/expected-initial.json" "$inventory"
+  if ! query_inventory_until "$uds" "$dir/expected-initial.json" "$dir/query-initial.json"; then
     record_failure "robust-collector-initial" "$dir" "initial collector query failed"
     return
   fi
@@ -131,21 +137,23 @@ scenario_collector_error_recovery() {
   fi
   write_inventory_count "$inventory" "node-$name" 4 602 >/dev/null
   sleep 1
-  if ! query_until "$uds" 1 4 "$dir/query-recovered.json"; then
+  write_expected_manifest "$dir/expected-recovered.json" "$inventory"
+  if ! query_inventory_until "$uds" "$dir/expected-recovered.json" "$dir/query-recovered.json"; then
     record_failure "robust-collector-recovery" "$dir" "collector did not recover after malformed inventory was replaced with a valid file"
   fi
 }
 
 scenario_network_outage_recovery() {
   local name="robust-network-recovery"
-  IFS='|' read -r dir _tcp_port udp_port _multicast _inventory server_config client_config uds < <(make_count_fixture "$name" 3 701 true false)
+  IFS='|' read -r dir _tcp_port udp_port _multicast inventory server_config client_config uds < <(make_count_fixture "$name" 3 701 true false)
   local server_pid
   start_server_pid "$server_config" "$dir/server.log"
   server_pid="$E2E_LAST_PID"
   sleep 1
   start_backend "$client_config" "127.0.0.1:$udp_port" "$dir/backend.log"
   wait_for_socket "$uds"
-  if ! query_until "$uds" 1 3 "$dir/query-initial.json"; then
+  write_expected_manifest "$dir/expected-initial.json" "$inventory"
+  if ! query_inventory_until "$uds" "$dir/expected-initial.json" "$dir/query-initial.json"; then
     record_failure "robust-network-initial" "$dir" "initial query before outage failed"
     return
   fi
@@ -157,7 +165,8 @@ scenario_network_outage_recovery() {
   start_server_pid "$server_config" "$dir/server-restarted.log"
   server_pid="$E2E_LAST_PID"
   sleep 1
-  if ! query_until "$uds" 1 3 "$dir/query-recovered.json"; then
+  write_expected_manifest "$dir/expected-recovered.json" "$inventory"
+  if ! query_inventory_until "$uds" "$dir/expected-recovered.json" "$dir/query-recovered.json"; then
     record_failure "robust-network-reconnect" "$dir" "backend did not reconnect after server restarted on the same address"
   fi
 }
@@ -251,14 +260,12 @@ scenario_dynamic_scale_robustness() {
   for uds in "${backend_sockets[@]}"; do
     wait_for_socket "$uds"
   done
-  local expected_total=0
-  for count in "${final_counts[@]}"; do
-    expected_total=$((expected_total + count))
-  done
+  local expected="$scale_dir/expected-final.json"
+  write_expected_manifest "$expected" "${inventories[@]}"
   local uds
   for i in $(seq 1 "$frontend_count"); do
     uds="${backend_sockets[$(((i - 1) % backend_count))]}"
-    if ! query_until "$uds" "$server_count" "$expected_total" "$scale_dir/query-final-$i.json"; then
+    if ! query_inventory_until "$uds" "$expected" "$scale_dir/query-final-$i.json"; then
       record_failure "robust-scale-final" "$scale_dir" "dynamic robustness scenario did not converge to the recovered final topology"
       break
     fi
@@ -275,7 +282,17 @@ scenario_exception_matrix() {
   local matrix_dir="$E2E_TMP_ROOT/robust-exception-matrix"
   mkdir -p "$matrix_dir"
   local groups=4
-  for g in $(seq 0 $((groups - 1))); do
+  local start_group=0
+  local end_group=$((groups - 1))
+  if [[ -n "${E2E_ROBUSTNESS_GROUP:-}" ]]; then
+    start_group="$E2E_ROBUSTNESS_GROUP"
+    end_group="$E2E_ROBUSTNESS_GROUP"
+    if (( start_group < 0 || start_group >= groups )); then
+      echo "invalid E2E_ROBUSTNESS_GROUP=$E2E_ROBUSTNESS_GROUP" >&2
+      return 1
+    fi
+  fi
+  for g in $(seq "$start_group" "$end_group"); do
     local dir="$matrix_dir/group-$g"
     mkdir -p "$dir"
     local mcast_port multicast
@@ -357,12 +374,16 @@ JSON
   done
 }
 
-register_scenario scenario_expand_inventory
-register_scenario scenario_shrink_inventory
-register_scenario scenario_collector_error_recovery
-register_scenario scenario_network_outage_recovery
-register_scenario scenario_dynamic_scale_robustness
-register_scenario scenario_exception_matrix
+if [[ -n "${E2E_ROBUSTNESS_GROUP:-}" ]]; then
+  register_scenario scenario_exception_matrix
+else
+  register_scenario scenario_expand_inventory
+  register_scenario scenario_shrink_inventory
+  register_scenario scenario_collector_error_recovery
+  register_scenario scenario_network_outage_recovery
+  register_scenario scenario_dynamic_scale_robustness
+  register_scenario scenario_exception_matrix
+fi
 
 run_registered_scenarios
 

@@ -2,9 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SERVER_BIN="${SERVER_BIN:-$ROOT_DIR/target/debug/server}"
-BACKEND_BIN="${BACKEND_BIN:-$ROOT_DIR/target/debug/gpustat4cluster-client-backend}"
-CLIENT_BIN="${CLIENT_BIN:-$ROOT_DIR/target/debug/gpustat4cluster}"
+SERVER_BIN="${SERVER_BIN:-$ROOT_DIR/target/release/server}"
+BACKEND_BIN="${BACKEND_BIN:-$ROOT_DIR/target/release/gpustat4cluster-client-backend}"
+CLIENT_BIN="${CLIENT_BIN:-$ROOT_DIR/target/release/gpustat4cluster}"
 E2E_TMP_ROOT="${E2E_TMP_ROOT:-$(mktemp -d)}"
 E2E_PIDS=()
 E2E_CONTAINERS=()
@@ -43,7 +43,12 @@ cleanup_e2e() {
 trap cleanup_e2e EXIT
 
 require_binaries() {
-  (cd "$ROOT_DIR" && cargo build --locked -p server --features test-collector && cargo build --locked -p gpustat4cluster-client-backend -p gpustat4cluster-client-cli)
+  if [[ "${E2E_SKIP_BUILD:-0}" != "1" ]]; then
+    (cd "$ROOT_DIR" && cargo build --locked --release -p server --features test-collector --no-default-features && cargo build --locked --release -p gpustat4cluster-client-backend --features test-api && cargo build --locked --release -p gpustat4cluster-client-cli)
+  fi
+  for bin in "$SERVER_BIN" "$BACKEND_BIN" "$CLIENT_BIN"; do
+    [[ -x "$bin" ]] || { echo "required e2e binary is missing or not executable: $bin" >&2; exit 127; }
+  done
   if [[ "$E2E_NODE_MODE" == "docker" ]]; then
     docker image inspect "$E2E_NODE_IMAGE" >/dev/null 2>&1 || {
       docker build -f "$ROOT_DIR/docker/e2e-node.Dockerfile" -t "$E2E_NODE_IMAGE" "$ROOT_DIR"
@@ -346,7 +351,7 @@ query_inventory_until() {
 assert_query_latency() {
   local uds="$1" max_first_us="$2" avg_max_us="$3" out="$4"
   python3 - "$CLIENT_BIN" "$uds" "$max_first_us" "$avg_max_us" "$out" <<'PY'
-import json, os, subprocess, sys
+import json, os, subprocess, sys, time
 client, uds, first_limit, avg_limit, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
 env = os.environ.copy(); env['GPUSTAT4CLUSTER_BACKEND_SOCKET'] = uds
 samples=[]
@@ -357,7 +362,9 @@ def max_delay_us(payload):
         raise RuntimeError('query response did not include delay_us')
     return max(delays)
 for i in range(11):
+    start = time.perf_counter_ns()
     cp=subprocess.run([client, '--json'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    wall_us=(time.perf_counter_ns()-start)//1000
     if cp.returncode:
         sys.stderr.write(cp.stderr.decode(errors='replace')); sys.exit(cp.returncode)
     try:
@@ -368,15 +375,66 @@ for i in range(11):
         sys.exit(1)
     if i==0:
         open(out, 'wb').write(cp.stdout)
-        if dur > first_limit:
-            print(f"latency first query {dur}us exceeds limit {first_limit}us", file=sys.stderr); sys.exit(1)
+        if wall_us > first_limit:
+            print(f"first gpustat render {wall_us}us exceeds limit {first_limit}us", file=sys.stderr); sys.exit(1)
     else:
         samples.append(dur)
 avg=sum(samples)//len(samples)
-print(f"latency first_ok<= {first_limit}us avg_10={avg}us limit={avg_limit}us", file=sys.stderr)
+print(f"latency first_render_ok<= {first_limit}us avg_delay_10={avg}us limit={avg_limit}us", file=sys.stderr)
 if avg > avg_limit:
     sys.exit(1)
 PY
+}
+
+request_backend_shutdown() {
+  local uds="$1" reason="${2:-e2e graceful shutdown}"
+  python3 - "$uds" "$reason" <<'PY'
+import socket, sys
+uds, reason = sys.argv[1], sys.argv[2]
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+    s.connect(uds)
+    s.sendall(f"SHUTDOWN {reason}\n".encode())
+    data = b""
+    while not data.endswith(b"\n"):
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+if not data.startswith(b"OK shutdown"):
+    raise SystemExit(f"unexpected shutdown response: {data!r}")
+PY
+}
+
+assert_server_disconnect_seen() {
+  local log="$1" protocol="$2" deadline=$((SECONDS + 5))
+  local pattern
+  case "$protocol" in
+    tcp) pattern='tcp_peer_disconnect' ;;
+    udp) pattern='udp_peer_disconnect' ;;
+    *) pattern='peer_disconnect' ;;
+  esac
+  while (( SECONDS < deadline )); do
+    if [[ -f "$log" ]] && grep -q "$pattern" "$log"; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "server did not log $pattern in $log" >&2
+  [[ -f "$log" ]] && sed -n '1,220p' "$log" >&2 || true
+  return 1
+}
+
+assert_backend_disconnected_seen() {
+  local log="$1" deadline=$((SECONDS + 5))
+  while (( SECONDS < deadline )); do
+    if [[ -f "$log" ]] && grep -q 'event=disconnected' "$log"; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "backend did not log event=disconnected in $log" >&2
+  [[ -f "$log" ]] && sed -n '1,220p' "$log" >&2 || true
+  return 1
 }
 
 stop_e2e_pid() {
