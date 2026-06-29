@@ -4,13 +4,6 @@ on:
   push:
     branches:
       - "**"
-  workflow_dispatch:
-    inputs:
-      commit_target:
-        description: "Commit, branch, or tag to test"
-        required: true
-        default: "main"
-        type: string
 
 concurrency:
   group: nightly-test-${{ github.event_name == 'workflow_dispatch' && inputs.commit_target || github.ref }}
