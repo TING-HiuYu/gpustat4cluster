@@ -654,8 +654,10 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::cache::{upsert_snapshot, CacheMap};
+    use crate::connection::ServerConnection;
     use common::{GresInfo, GresMemory, GresProcessInfo, GresUtilization, ServerGresSnapshot};
     use std::collections::HashMap;
+    use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
 
     fn sample_cache() -> SharedCache {
@@ -708,6 +710,40 @@ mod tests {
         )
     }
 
+    #[derive(Debug)]
+    struct MockConnection {
+        addr: SocketAddr,
+        snapshot: ServerGresSnapshot,
+    }
+
+    impl ServerConnection for MockConnection {
+        fn protocol(&self) -> &'static str {
+            "tcp"
+        }
+
+        fn addr(&self) -> SocketAddr {
+            self.addr
+        }
+
+        fn hostname(&self) -> String {
+            self.snapshot.hostname.clone()
+        }
+
+        fn gres_num(&self) -> u8 {
+            self.snapshot.gres.len() as u8
+        }
+
+        fn query(&self, _timeout: Duration) -> Result<ServerGresSnapshot, String> {
+            Ok(self.snapshot.clone())
+        }
+
+        fn disconnect(&self, _reason: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn close(&self) {}
+    }
+
     #[test]
     fn query_response_includes_snapshot_node() {
         let response = handle_command("QUERY {}", &state(sample_cache())).expect("query response");
@@ -745,5 +781,63 @@ mod tests {
         let response =
             handle_command("TEST_CACHE_KEYS", &state(sample_cache())).expect("test response");
         assert_eq!(response, "127.0.0.1-30000\n");
+    }
+
+    #[test]
+    fn query_refreshes_stale_cache_through_connection_trait() {
+        let addr: SocketAddr = "127.0.0.1:39001".parse().unwrap();
+        let cache = Arc::new(Mutex::new(CacheMap::new()));
+        {
+            let mut rows = cache.lock().unwrap();
+            rows.insert(
+                "127.0.0.1-39001".to_string(),
+                crate::cache::ConnectionCacheEntry {
+                    connection_id: "conn-001".to_string(),
+                    hostname: "mock-node".to_string(),
+                    num: 0,
+                    server_gres: Vec::new(),
+                    record_timestamp: 0,
+                    addr,
+                    last_snapshot: None,
+                    last_error: None,
+                    last_query_latency_us: None,
+                },
+            );
+        }
+        let state = state(cache.clone());
+        state.connections.lock().unwrap().insert(
+            addr,
+            Arc::new(MockConnection {
+                addr,
+                snapshot: ServerGresSnapshot {
+                    hostname: "mock-node".to_string(),
+                    driver_version: Some("test-driver".to_string()),
+                    gres: (0..4)
+                        .map(|index| GresInfo {
+                            index,
+                            name: format!("NVIDIA Test GPU {index}"),
+                            temperature_c: Some(30 + index as u32),
+                            uuid: Some(format!("GRES-MOCK-{index}")),
+                            memory: GresMemory {
+                                used_mb: 1024 + index as u64,
+                                total_mb: 24 * 1024,
+                            },
+                            utilization: GresUtilization {
+                                gres_percent: 50 + index,
+                                memory_percent: 10,
+                            },
+                            processes: Vec::new(),
+                        })
+                        .collect(),
+                },
+            }),
+        );
+
+        let response = handle_command("QUERY {}", &state).expect("query response");
+        let json: serde_json::Value = serde_json::from_str(response.trim()).expect("json");
+        assert_eq!(json["nodes"][0]["hostname"], "mock-node");
+        assert_eq!(json["nodes"][0]["num"], 4);
+        assert_eq!(json["nodes"][0]["gres"].as_array().unwrap().len(), 4);
+        assert_eq!(json["nodes"][0]["gres"][3]["mem_total_mb"], 24 * 1024);
     }
 }

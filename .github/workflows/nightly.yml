@@ -1,0 +1,99 @@
+name: Nightly test
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+    inputs:
+      commit_target:
+        description: "Commit, branch, or tag to test"
+        required: true
+        default: "main"
+        type: string
+
+concurrency:
+  group: nightly-test-${{ github.event_name == 'workflow_dispatch' && inputs.commit_target || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout push target
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/checkout@v4
+
+      - name: Checkout manual target
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_target }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run cargo test
+        run: cargo test --workspace
+
+      - name: Run test-collector cargo test
+        run: cargo test -p server --features test-collector --no-default-features
+
+      - name: Build production binaries
+        run: |
+          cargo build --locked --release -p server --features nvml
+          cargo build --locked --release -p gpustat4cluster-client-backend -p gpustat4cluster-client-cli
+
+      - name: Build test-collector server binary
+        run: cargo build --locked -p server --features test-collector --no-default-features
+
+  e2e-tests:
+    name: ${{ matrix.name }}
+    needs: cargo-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: e2e client-first static tcp
+            script: scripts/e2e-client-first-static.sh
+          - name: e2e client-first dynamic tcp
+            script: scripts/e2e-client-first-dynamic.sh
+          - name: e2e server-first static tcp
+            script: scripts/e2e-server-first-static.sh
+          - name: e2e server-first dynamic tcp
+            script: scripts/e2e-server-first-dynamic.sh
+          - name: e2e client-first static udp
+            script: scripts/e2e-client-first-static-udp.sh
+          - name: e2e client-first dynamic udp
+            script: scripts/e2e-client-first-dynamic-udp.sh
+          - name: e2e server-first static udp
+            script: scripts/e2e-server-first-static-udp.sh
+          - name: e2e server-first dynamic udp
+            script: scripts/e2e-server-first-dynamic-udp.sh
+          - name: e2e dynamic scale udp
+            script: scripts/e2e-dynamic-scale.sh
+          - name: e2e robustness udp
+            script: scripts/e2e-robustness.sh
+    steps:
+      - name: Checkout push target
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/checkout@v4
+
+      - name: Checkout manual target
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_target }}
+
+      - name: Run ${{ matrix.name }}
+        run: scripts/e2e-docker-run.sh ${{ matrix.script }}
