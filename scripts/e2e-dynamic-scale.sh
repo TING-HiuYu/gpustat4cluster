@@ -6,6 +6,7 @@ scale_dir="$E2E_TMP_ROOT/scale"
 mkdir -p "$scale_dir"
 read -r mcast_port < <(alloc_ports 1)
 multicast="239.255.0.222:$mcast_port"
+protocol="${E2E_PROTOCOL:-udp}"
 expected_gres=0
 server_count=16
 backend_count=8
@@ -22,7 +23,7 @@ for i in $(seq 1 "$server_count"); do
   server_config="$dir/server.toml"
   count="$(write_inventory "$inventory" "scale-node-$i" "$((100 + i))")"
   expected_gres=$((expected_gres + count))
-  write_server_config "$server_config" "$tcp_port" "$udp_port" "$multicast" "$inventory" "$runtime"
+  write_server_config "$server_config" "$tcp_port" "$udp_port" "$multicast" "$inventory" "$runtime" false "$protocol"
   server_configs+=("$server_config|$dir/server.log")
 done
 for i in $(seq 1 "$backend_count"); do
@@ -30,7 +31,7 @@ for i in $(seq 1 "$backend_count"); do
   mkdir -p "$dir"
   uds="$dir/client.sock"
   client_config="$dir/client.toml"
-  write_client_config "$client_config" "$uds" "$multicast"
+  write_client_config "$client_config" "$uds" "$multicast" "$protocol"
   backend_configs+=("$client_config|$dir/backend.log")
   backend_sockets+=("$uds")
 done
@@ -72,4 +73,4 @@ for i in "${!backend_configs[@]}"; do
   IFS='|' read -r _cfg log <<<"${backend_configs[$i]}"
   assert_connected_events_at_least "$log" "$server_count"
 done
-echo "dynamic-scale ok nodes=$server_count gres=$expected_gres frontends=$frontend_count backends=$backend_count"
+echo "dynamic-scale ok protocol=$protocol nodes=$server_count gres=$expected_gres frontends=$frontend_count backends=$backend_count"

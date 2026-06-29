@@ -95,10 +95,16 @@ jobs:
         run: scripts/e2e-docker-run.sh ${{ matrix.script }}
 
   e2e-dynamic-scale:
-    name: e2e dynamic scale udp
+    name: e2e dynamic scale ${{ matrix.protocol }}
     needs: e2e-basic-tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol:
+          - tcp
+          - udp
     steps:
       - name: Checkout push target
         if: github.event_name != 'workflow_dispatch'
@@ -110,11 +116,11 @@ jobs:
         with:
           ref: ${{ inputs.commit_target }}
 
-      - name: Run e2e dynamic scale udp
-        run: scripts/e2e-docker-run.sh scripts/e2e-dynamic-scale.sh
+      - name: Run e2e dynamic scale ${{ matrix.protocol }}
+        run: E2E_PROTOCOL=${{ matrix.protocol }} scripts/e2e-docker-run.sh scripts/e2e-dynamic-scale.sh
 
   e2e-robustness:
-    name: e2e robustness udp
+    name: e2e robustness mixed tcp udp
     needs: e2e-dynamic-scale
     runs-on: ubuntu-latest
     timeout-minutes: 20
