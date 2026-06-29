@@ -1051,10 +1051,16 @@ mod tests {
             .start_runtime_writer(&runtime_path, std::time::Duration::from_millis(5))
             .expect("start writer");
 
-        std::thread::sleep(std::time::Duration::from_millis(20));
         let first = read_runtime_mmap(&runtime_path).expect("read first runtime");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let second = read_runtime_mmap(&runtime_path).expect("read second runtime");
+        let mut second = first.clone();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            second = read_runtime_mmap(&runtime_path).expect("read updated runtime");
+            if first.gres[0].memory_used_mb != second.gres[0].memory_used_mb {
+                break;
+            }
+        }
         writer.stop();
 
         assert_eq!(first.gres.len(), inventory.gres.len());
