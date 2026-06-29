@@ -857,7 +857,6 @@ fn query_server_loop(
                     ttl_ms,
                 );
                 thread::spawn(move || {
-                    let _ = stream.set_read_timeout(Some(connection_idle_timeout));
                     let _ = stream.set_write_timeout(Some(connection_idle_timeout));
                     handle_query_stream(&mut stream, &context);
                 });
