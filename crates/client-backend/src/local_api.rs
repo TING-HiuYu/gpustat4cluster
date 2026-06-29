@@ -590,15 +590,42 @@ fn refresh_stale_cache_for_query(state: &LocalApiState) -> Result<(), String> {
                     ts_ms: now_ms(),
                 };
                 state.establish_connections(&[node]);
-                state
+                match state
                     .connections
                     .lock()
                     .map_err(|_| "connection pool lock poisoned".to_string())?
                     .get(&target.addr)
                     .cloned()
-                    .ok_or_else(|| {
-                        format!("no {} connection for {}", state.protocol(), target.addr)
-                    })?
+                {
+                    Some(connection) => connection,
+                    None => {
+                        let error =
+                            format!("no {} connection for {}", state.protocol(), target.addr);
+                        logger::transport_warn(
+                            state.protocol(),
+                            format!(
+                                "event=connection_unavailable addr={} hostname={} error={}",
+                                target.addr, target.hostname, error
+                            ),
+                        );
+                        let mut rows = state
+                            .cache
+                            .lock()
+                            .map_err(|_| "cache lock poisoned".to_string())?;
+                        if target.had_snapshot {
+                            crate::cache::mark_stale(
+                                &mut rows,
+                                target.connection_id,
+                                target.addr,
+                                target.hostname,
+                                error,
+                            );
+                        } else {
+                            rows.remove(&format!("{}-{}", target.addr.ip(), target.addr.port()));
+                        }
+                        continue;
+                    }
+                }
             }
         };
 
