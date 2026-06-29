@@ -26,6 +26,7 @@ pub struct LocalApiState {
     multicast_outbound_ip: Vec<String>,
     connections: Arc<Mutex<HashMap<SocketAddr, SharedServerConnection>>>,
     connecting: Arc<Mutex<HashSet<SocketAddr>>>,
+    last_discovery_reconcile_ms: Arc<Mutex<i64>>,
 }
 
 impl LocalApiState {
@@ -54,6 +55,7 @@ impl LocalApiState {
             multicast_outbound_ip,
             connections: Arc::new(Mutex::new(HashMap::new())),
             connecting: Arc::new(Mutex::new(HashSet::new())),
+            last_discovery_reconcile_ms: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -461,7 +463,7 @@ pub(crate) fn handle_command(cmd: &str, state: &LocalApiState) -> Result<String,
 
     if let Some(payload) = cmd.strip_prefix("QUERY") {
         let req = adapter::parse_query_request(payload.trim())?;
-        ensure_nodes_available_for_query(state)?;
+        reconcile_discovery_for_query(state)?;
         refresh_stale_cache_for_query(state)?;
         let rows = state
             .cache
@@ -476,17 +478,18 @@ pub(crate) fn handle_command(cmd: &str, state: &LocalApiState) -> Result<String,
     Ok(format!("ERR unsupported command: {}\n", cmd))
 }
 
-fn ensure_nodes_available_for_query(state: &LocalApiState) -> Result<(), String> {
-    let cache_is_empty = state
-        .cache
-        .lock()
-        .map_err(|_| "cache lock poisoned".to_string())?
-        .is_empty();
-    if !cache_is_empty {
+fn reconcile_discovery_for_query(state: &LocalApiState) -> Result<(), String> {
+    if should_skip_query_discovery_reconcile(state)? {
         return Ok(());
     }
 
-    logger::info("cache is empty; running discovery before QUERY");
+    let before_count = state
+        .cache
+        .lock()
+        .map_err(|_| "cache lock poisoned".to_string())?
+        .len();
+
+    logger::info("running query-triggered discovery reconcile");
     let multicast_nodes = match discovery::discover_nodes(
         &state.discovery_multicast_addr,
         state.discover_wait,
@@ -512,17 +515,55 @@ fn ensure_nodes_available_for_query(state: &LocalApiState) -> Result<(), String>
         return Ok(());
     }
 
-    let mut rows = state
+    state.add_discovered_nodes(&discovered);
+    let after_count = state
         .cache
         .lock()
-        .map_err(|_| "cache lock poisoned".to_string())?;
-    if rows.is_empty() {
-        *rows = crate::cache::build_cache(discovered);
+        .map_err(|_| "cache lock poisoned".to_string())?
+        .len();
+    if after_count > before_count {
         logger::info(format!(
-            "query-triggered discovery populated {} node(s)",
-            rows.len()
+            "query-triggered discovery added {} node(s)",
+            after_count - before_count
         ));
     }
+    state.establish_connections(&discovered);
+    Ok(())
+}
+
+fn should_skip_query_discovery_reconcile(state: &LocalApiState) -> Result<bool, String> {
+    let cache_len = state
+        .cache
+        .lock()
+        .map_err(|_| "cache lock poisoned".to_string())?
+        .len();
+    if cache_len == 0 {
+        set_last_discovery_reconcile_now(state)?;
+        return Ok(false);
+    }
+    if cache_len >= state.max_connections {
+        return Ok(true);
+    }
+
+    let now = now_ms();
+    let min_interval_ms = state.discover_wait.as_millis().max(1) as i64;
+    let mut last = state
+        .last_discovery_reconcile_ms
+        .lock()
+        .map_err(|_| "discovery reconcile lock poisoned".to_string())?;
+    if now.saturating_sub(*last) < min_interval_ms {
+        return Ok(true);
+    }
+    *last = now;
+    Ok(false)
+}
+
+fn set_last_discovery_reconcile_now(state: &LocalApiState) -> Result<(), String> {
+    let mut last = state
+        .last_discovery_reconcile_ms
+        .lock()
+        .map_err(|_| "discovery reconcile lock poisoned".to_string())?;
+    *last = now_ms();
     Ok(())
 }
 
@@ -698,7 +739,7 @@ mod tests {
     fn state(cache: SharedCache) -> LocalApiState {
         LocalApiState::new(
             cache,
-            40,
+            10_000,
             "udp".to_string(),
             0,
             "239.0.0.1:4000".to_string(),
