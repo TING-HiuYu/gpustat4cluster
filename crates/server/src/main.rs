@@ -16,6 +16,8 @@ use std::{
 
 use cache::GresCache;
 use chrono::Local;
+#[cfg(feature = "test-collector")]
+use collector::TestGresCollector;
 use collector::{GresCollector, NvmlCollector};
 use common::{Config, DiscoveryAnnounce, DiscoveryQuery, ErrorCode, PROTOCOL_VERSION};
 use serde_json::json;
@@ -173,6 +175,44 @@ fn build_collector(
     hostname: &str,
     config: &Config,
 ) -> Result<(Arc<dyn GresCollector>, bool, &'static str), StartupError> {
+    #[cfg(feature = "test-collector")]
+    if let Some(inventory_path) = config.runtime.test_inventory_path.as_deref() {
+        let collector = TestGresCollector::from_inventory_file_with_reload(
+            inventory_path,
+            config.runtime.test_inventory_reload,
+        )
+        .map_err(|err| {
+            StartupError::new(
+                ErrorCode::ConfigInvalid,
+                format!("test collector inventory failed: {err}"),
+            )
+        })?;
+        let collector = if let Some(runtime_path) = config.runtime.test_runtime_path.as_deref() {
+            let collector = collector.with_runtime_path(runtime_path);
+            let writer = collector
+                .start_runtime_writer(runtime_path, Duration::from_millis(5))
+                .map_err(|err| {
+                    StartupError::new(
+                        ErrorCode::ConfigInvalid,
+                        format!("test collector runtime mmap failed: {err}"),
+                    )
+                })?;
+            std::mem::forget(writer);
+            collector
+        } else {
+            collector
+        };
+        let _ = hostname;
+        return Ok((Arc::new(collector) as Arc<dyn GresCollector>, false, "test"));
+    }
+    #[cfg(not(feature = "test-collector"))]
+    if config.runtime.test_inventory_path.is_some() || config.runtime.test_runtime_path.is_some() {
+        return Err(StartupError::new(
+            ErrorCode::ConfigInvalid,
+            "runtime.test_inventory_path/runtime.test_runtime_path require building the server with --features test-collector".to_string(),
+        ));
+    }
+
     NvmlCollector::new(
         hostname.to_string(),
         config.runtime.nvml_lib_path.as_deref(),

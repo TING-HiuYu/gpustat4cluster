@@ -1,0 +1,10 @@
+.git
+.github
+.codex
+target
+dist
+*.tar.gz
+*.zip
+*.deb
+*.rpm
+*.pkg.tar.zst
