@@ -53,7 +53,7 @@ impl TransportContext {
     ) -> Result<Option<Vec<u8>>, TransportError> {
         match self
             .cache
-            .get_or_refresh(self.collector.as_ref(), self.ttl_ms)
+            .get_latest_or_refresh(self.collector.as_ref(), self.ttl_ms)
         {
             Ok(entry) => {
                 let runtime = RuntimeSnapshot::from_snapshot(entry.snapshot.as_ref());
@@ -177,7 +177,7 @@ impl TransportContext {
 
         match self
             .cache
-            .get_or_refresh(self.collector.as_ref(), self.ttl_ms)
+            .get_latest_or_refresh(self.collector.as_ref(), self.ttl_ms)
         {
             Ok(entry) => {
                 let runtime = RuntimeSnapshot::from_snapshot(entry.snapshot.as_ref());
@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn query_frame_refreshes_expired_cache_entry() {
+    fn query_frame_uses_latest_cache_entry() {
         let ctx = context_with_ttl(
             Arc::new(GrowingCollector {
                 calls: AtomicUsize::new(0),
@@ -471,11 +471,11 @@ mod tests {
         let (_, second_payload) = common::decode_frame(&second).expect("decode second query");
         let second_runtime =
             common::decode_runtime_payload(second_payload).expect("second runtime");
-        assert_eq!(second_runtime.gres.len(), 2);
+        assert_eq!(second_runtime.gres.len(), 1);
     }
 
     #[test]
-    fn udp_empty_query_refreshes_expired_cache_entry() {
+    fn udp_empty_query_uses_latest_cache_entry() {
         let ctx = context_with_ttl(
             Arc::new(GrowingCollector {
                 calls: AtomicUsize::new(0),
@@ -504,7 +504,7 @@ mod tests {
         let (_, second_payload) = common::decode_frame(&second_frame).expect("decode second frame");
         let second_runtime =
             common::decode_runtime_payload(second_payload).expect("second runtime");
-        assert_eq!(second_runtime.gres.len(), 2);
+        assert_eq!(second_runtime.gres.len(), 1);
     }
 
     #[test]

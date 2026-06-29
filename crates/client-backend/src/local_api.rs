@@ -484,6 +484,33 @@ fn reconcile_discovery_for_query(state: &LocalApiState) -> Result<(), String> {
         return Ok(());
     }
 
+    let cache_len = state
+        .cache
+        .lock()
+        .map_err(|_| "cache lock poisoned".to_string())?
+        .len();
+    let connection_len = state
+        .connections
+        .lock()
+        .map_err(|_| "connection pool lock poisoned".to_string())?
+        .len();
+    if cache_len > 0 && connection_len > 0 {
+        let reconcile_state = state.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = run_discovery_reconcile(&reconcile_state) {
+                logger::warn(format!(
+                    "background query discovery reconcile failed: {}",
+                    e
+                ));
+            }
+        });
+        return Ok(());
+    }
+
+    run_discovery_reconcile(state)
+}
+
+fn run_discovery_reconcile(state: &LocalApiState) -> Result<(), String> {
     let before_count = state
         .cache
         .lock()
