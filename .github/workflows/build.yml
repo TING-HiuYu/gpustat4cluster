@@ -1,4 +1,4 @@
-name: build
+name: Build
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
       commit_sha: ${{ steps.meta.outputs.commit_sha }}
     steps:
       - name: Checkout target
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.commit_target }}
           fetch-depth: 0
@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout target
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-target.outputs.commit_sha }}
 
@@ -90,25 +90,25 @@ jobs:
             target/aarch64-unknown-linux-gnu/release/gpustat4cluster-client-backend
 
       - name: Upload server deb artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gpustat4cluster-server-multiarch.deb
           path: build-artifacts/gpustat4cluster-server-multiarch.deb
 
       - name: Upload client deb artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gpustat4cluster-client-multiarch.deb
           path: build-artifacts/gpustat4cluster-client-multiarch.deb
 
       - name: Upload x86_64 anylinux artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gpustat4cluster-server&client-anylinux-x86_64.zip
           path: build-artifacts/gpustat4cluster-server&client-anylinux-x86_64.zip
 
       - name: Upload aarch64 anylinux artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gpustat4cluster-server&client-anylinux-aarch64.zip
           path: build-artifacts/gpustat4cluster-server&client-anylinux-aarch64.zip
@@ -119,7 +119,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout target
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-target.outputs.commit_sha }}
 
@@ -142,13 +142,13 @@ jobs:
           cp dist/gpustat4cluster-client-*.noarch.rpm build-artifacts/gpustat4cluster-client-multiarch.rpm
 
       - name: Upload server rpm artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gpustat4cluster-server-multiarch.rpm
           path: build-artifacts/gpustat4cluster-server-multiarch.rpm
 
       - name: Upload client rpm artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gpustat4cluster-client-multiarch.rpm
           path: build-artifacts/gpustat4cluster-client-multiarch.rpm
@@ -159,7 +159,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout target
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-target.outputs.commit_sha }}
 
@@ -179,7 +179,7 @@ jobs:
           cp dist/*.pkg.tar.zst build-artifacts/gpustat4cluster-client-archlinux-multiarch.pkg.tar.zst
 
       - name: Upload Arch Linux artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gpustat4cluster-client-archlinux-multiarch.pkg.tar.zst
           path: build-artifacts/gpustat4cluster-client-archlinux-multiarch.pkg.tar.zst
@@ -190,7 +190,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout target
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-target.outputs.commit_sha }}
 
@@ -225,7 +225,7 @@ jobs:
           tar -C "$pkgdir" -czf "build-artifacts/gpustat4cluster-client-macos-multiarch.tar.gz" .
 
       - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gpustat4cluster-client-macos-multiarch.tar.gz
           path: build-artifacts/gpustat4cluster-client-macos-multiarch.tar.gz
@@ -236,7 +236,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout target
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.resolve-target.outputs.commit_sha }}
 
@@ -276,7 +276,7 @@ jobs:
           Compress-Archive -Path package-root\* -DestinationPath "build-artifacts\gpustat4cluster-client-windows-multiarch.zip" -Force
 
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gpustat4cluster-client-windows-multiarch.zip
           path: build-artifacts/gpustat4cluster-client-windows-multiarch.zip

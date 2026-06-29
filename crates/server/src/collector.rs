@@ -117,46 +117,510 @@ pub trait GresCollector: Send + Sync {
     }
 }
 
-#[cfg(test)]
-#[derive(Debug)]
-pub struct TestGresCollector {
-    hostname: String,
-    gres_count: u8,
-}
+#[cfg(any(test, feature = "test-collector"))]
+mod test_collector {
+    use super::*;
+    use memmap2::{Mmap, MmapMut};
+    use serde::{Deserialize, Serialize};
+    use std::{
+        fs::{File, OpenOptions},
+        io::{Read, Write},
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        thread,
+        time::Duration,
+    };
 
-#[cfg(test)]
-impl TestGresCollector {
-    pub fn new(hostname: impl Into<String>) -> Self {
-        Self {
-            hostname: hostname.into(),
-            gres_count: 1,
+    const DEFAULT_RUNTIME_CAPACITY: usize = 64 * 1024;
+    const RUNTIME_HEADER_LEN: usize = 8;
+    const DEFAULT_REFRESH_MS: u64 = 5;
+
+    #[derive(Debug, Clone)]
+    pub struct TestGresCollector {
+        inventory: TestGresInventory,
+        inventory_path: Option<PathBuf>,
+        reload_inventory: bool,
+        runtime_path: Option<PathBuf>,
+    }
+
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    pub struct RuntimeWriterHandle {
+        stop: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    #[allow(dead_code)]
+    impl RuntimeWriterHandle {
+        pub fn stop(mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
         }
     }
 
-    pub fn with_gres_count(hostname: impl Into<String>, gres_count: u8) -> Self {
-        Self {
-            hostname: hostname.into(),
-            gres_count: gres_count.max(1),
+    impl Drop for RuntimeWriterHandle {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
         }
     }
-}
 
-#[cfg(test)]
-impl Default for TestGresCollector {
-    fn default() -> Self {
-        Self::new("test-host")
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct TestGresInventory {
+        pub hostname: String,
+        #[serde(default)]
+        pub driver_version: Option<String>,
+        pub gres: Vec<TestGresInventoryResource>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct TestGresInventoryResource {
+        pub index: u8,
+        pub name: String,
+        #[serde(default)]
+        pub uuid: Option<String>,
+        pub memory_total_mb: u64,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct TestGresRuntimeState {
+        pub gres: Vec<TestGresRuntimeResource>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct TestGresRuntimeResource {
+        pub index: u8,
+        #[serde(default)]
+        pub temperature_c: Option<u32>,
+        pub memory_used_mb: u64,
+        pub utilization_gres_percent: u8,
+        pub utilization_memory_percent: u8,
+        #[serde(default)]
+        pub processes: Vec<TestGresRuntimeProcess>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct TestGresRuntimeProcess {
+        pub pid: u32,
+        pub uid: u32,
+        pub used_memory_mb: u64,
+    }
+
+    impl TestGresCollector {
+        pub fn new(hostname: impl Into<String>) -> Self {
+            Self::from_inventory(default_inventory(hostname.into(), 1))
+        }
+
+        #[allow(dead_code)]
+        pub fn with_gres_count(hostname: impl Into<String>, gres_count: u8) -> Self {
+            Self::from_inventory(default_inventory(hostname.into(), gres_count.max(1)))
+        }
+
+        pub fn from_inventory(inventory: TestGresInventory) -> Self {
+            Self {
+                inventory,
+                inventory_path: None,
+                reload_inventory: false,
+                runtime_path: None,
+            }
+        }
+
+        #[allow(dead_code)]
+        pub fn from_inventory_file(path: impl AsRef<Path>) -> Result<Self, String> {
+            Self::from_inventory_file_with_reload(path, false)
+        }
+
+        pub fn from_inventory_file_with_reload(
+            path: impl AsRef<Path>,
+            reload_inventory: bool,
+        ) -> Result<Self, String> {
+            let path = path.as_ref();
+            let inventory = read_inventory_file(path)?;
+            Ok(Self {
+                inventory,
+                inventory_path: Some(path.to_path_buf()),
+                reload_inventory,
+                runtime_path: None,
+            })
+        }
+
+        pub fn with_runtime_path(mut self, path: impl Into<PathBuf>) -> Self {
+            self.runtime_path = Some(path.into());
+            self
+        }
+
+        pub fn start_runtime_writer(
+            &self,
+            path: impl AsRef<Path>,
+            refresh_interval: Duration,
+        ) -> Result<RuntimeWriterHandle, String> {
+            start_runtime_writer(
+                self.inventory.clone(),
+                path.as_ref().to_path_buf(),
+                refresh_interval,
+            )
+        }
+
+        #[allow(dead_code)]
+        pub fn inventory(&self) -> &TestGresInventory {
+            &self.inventory
+        }
+    }
+
+    impl Default for TestGresCollector {
+        fn default() -> Self {
+            Self::new("test-host")
+        }
+    }
+
+    impl GresCollector for TestGresCollector {
+        fn collect_gres(&self) -> Result<GresNodeSnapshot, ErrorCode> {
+            let inventory = if self.reload_inventory {
+                let path = self
+                    .inventory_path
+                    .as_deref()
+                    .ok_or(ErrorCode::ConfigInvalid)?;
+                match read_inventory_file(path) {
+                    Ok(inventory) => inventory,
+                    Err(error) => {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "level": "WARN",
+                                "event": "test_collector_error",
+                                "path": path.display().to_string(),
+                                "message": error,
+                            })
+                        );
+                        return Err(ErrorCode::ConfigInvalid);
+                    }
+                }
+            } else {
+                self.inventory.clone()
+            };
+            let runtime = match self.runtime_path.as_deref() {
+                Some(path) => {
+                    read_runtime_mmap(path).unwrap_or_else(|_| initial_runtime(&inventory))
+                }
+                None => initial_runtime(&inventory),
+            };
+            Ok(snapshot_from_inventory_runtime(&inventory, &runtime))
+        }
+    }
+
+    pub fn read_inventory_file(path: impl AsRef<Path>) -> Result<TestGresInventory, String> {
+        let path = path.as_ref();
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("read test inventory {} failed: {}", path.display(), e))?;
+        let inventory: TestGresInventory = serde_json::from_str(&raw)
+            .map_err(|e| format!("parse test inventory {} failed: {}", path.display(), e))?;
+        validate_inventory(&inventory)?;
+        Ok(inventory)
+    }
+
+    #[allow(dead_code)]
+    pub fn write_inventory_file(
+        path: impl AsRef<Path>,
+        inventory: &TestGresInventory,
+    ) -> Result<(), String> {
+        let path = path.as_ref();
+        let raw = serde_json::to_vec_pretty(inventory)
+            .map_err(|e| format!("encode test inventory failed: {e}"))?;
+        std::fs::write(path, raw)
+            .map_err(|e| format!("write test inventory {} failed: {}", path.display(), e))
+    }
+
+    pub fn start_runtime_writer(
+        inventory: TestGresInventory,
+        path: PathBuf,
+        refresh_interval: Duration,
+    ) -> Result<RuntimeWriterHandle, String> {
+        validate_inventory(&inventory)?;
+        init_runtime_file(&path, DEFAULT_RUNTIME_CAPACITY)?;
+        write_runtime_mmap(&path, &initial_runtime(&inventory))?;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            let mut tick = 0u64;
+            while !thread_stop.load(Ordering::SeqCst) {
+                let state = runtime_for_tick(&inventory, tick);
+                let _ = write_runtime_mmap(&path, &state);
+                tick = tick.wrapping_add(1);
+                thread::sleep(refresh_interval.max(Duration::from_millis(1)));
+            }
+        });
+
+        Ok(RuntimeWriterHandle {
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    pub fn init_runtime_file(path: impl AsRef<Path>, capacity: usize) -> Result<(), String> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create runtime dir {} failed: {}", parent.display(), e))?;
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|e| format!("open runtime mmap {} failed: {}", path.display(), e))?;
+        file.set_len(capacity as u64)
+            .map_err(|e| format!("resize runtime mmap {} failed: {}", path.display(), e))
+    }
+
+    pub fn read_runtime_mmap(path: impl AsRef<Path>) -> Result<TestGresRuntimeState, String> {
+        let path = path.as_ref();
+        let file = File::open(path)
+            .map_err(|e| format!("open runtime mmap {} failed: {}", path.display(), e))?;
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|e| format!("map runtime mmap {} failed: {}", path.display(), e))?;
+        if mmap.len() < RUNTIME_HEADER_LEN {
+            return Err(format!("runtime mmap {} is too small", path.display()));
+        }
+        let mut len_buf = [0u8; RUNTIME_HEADER_LEN];
+        len_buf.copy_from_slice(&mmap[..RUNTIME_HEADER_LEN]);
+        let len = u64::from_le_bytes(len_buf) as usize;
+        if len == 0 || RUNTIME_HEADER_LEN + len > mmap.len() {
+            return Err(format!(
+                "runtime mmap {} contains invalid length",
+                path.display()
+            ));
+        }
+        serde_json::from_slice(&mmap[RUNTIME_HEADER_LEN..RUNTIME_HEADER_LEN + len])
+            .map_err(|e| format!("parse runtime mmap {} failed: {}", path.display(), e))
+    }
+
+    pub fn write_runtime_mmap(
+        path: impl AsRef<Path>,
+        state: &TestGresRuntimeState,
+    ) -> Result<(), String> {
+        let path = path.as_ref();
+        let payload =
+            serde_json::to_vec(state).map_err(|e| format!("encode runtime state failed: {e}"))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| format!("open runtime mmap {} failed: {}", path.display(), e))?;
+        let mut mmap = unsafe { MmapMut::map_mut(&file) }
+            .map_err(|e| format!("map runtime mmap {} failed: {}", path.display(), e))?;
+        if RUNTIME_HEADER_LEN + payload.len() > mmap.len() {
+            return Err(format!(
+                "runtime mmap {} capacity {} is too small for {} byte payload",
+                path.display(),
+                mmap.len(),
+                payload.len()
+            ));
+        }
+        mmap[..RUNTIME_HEADER_LEN].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        mmap[RUNTIME_HEADER_LEN..RUNTIME_HEADER_LEN + payload.len()].copy_from_slice(&payload);
+        mmap.flush()
+            .map_err(|e| format!("flush runtime mmap {} failed: {}", path.display(), e))
+    }
+
+    pub fn initial_runtime(inventory: &TestGresInventory) -> TestGresRuntimeState {
+        runtime_for_tick(inventory, 0)
+    }
+
+    pub fn runtime_for_tick(inventory: &TestGresInventory, tick: u64) -> TestGresRuntimeState {
+        TestGresRuntimeState {
+            gres: inventory
+                .gres
+                .iter()
+                .map(|resource| {
+                    let idx = resource.index as u64;
+                    let max_used = resource.memory_total_mb.saturating_sub(1).max(1);
+                    let base_used = 1_234 + idx * 512;
+                    let used = (base_used + tick * 257) % max_used;
+                    let used = used.max(1).min(max_used);
+                    let base_util = 87u64.saturating_sub(idx * 7).max(1);
+                    let util = ((base_util + tick * 13) % 101).max(1) as u8;
+                    let memory_percent = used.saturating_mul(100) / resource.memory_total_mb.max(1);
+                    TestGresRuntimeResource {
+                        index: resource.index,
+                        temperature_c: Some(28 + ((tick + idx) % 55) as u32),
+                        memory_used_mb: used,
+                        utilization_gres_percent: util,
+                        utilization_memory_percent: memory_percent.min(100) as u8,
+                        processes: vec![
+                            TestGresRuntimeProcess {
+                                pid: 4_242 + resource.index as u32 * 10,
+                                uid: 1000 + resource.index as u32,
+                                used_memory_mb: 768 + idx * 128 + tick % 64,
+                            },
+                            TestGresRuntimeProcess {
+                                pid: 4_243 + resource.index as u32 * 10,
+                                uid: 2000 + resource.index as u32,
+                                used_memory_mb: 128,
+                            },
+                        ],
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    pub fn default_inventory(hostname: String, gres_count: u8) -> TestGresInventory {
+        TestGresInventory {
+            hostname: hostname.clone(),
+            driver_version: Some("test-driver".to_string()),
+            gres: (0..gres_count)
+                .map(|index| TestGresInventoryResource {
+                    index,
+                    name: format!("NVIDIA Test GPU {index}"),
+                    uuid: Some(format!(
+                        "GRES-TEST-{}-{index:04}",
+                        sanitize_uuid_part(&hostname)
+                    )),
+                    memory_total_mb: 16_384 + index as u64 * 1_024,
+                })
+                .collect(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn deterministic_inventory(seed: u64, hostname: String) -> TestGresInventory {
+        const MEMORY_GIB: [u64; 7] = [8, 16, 24, 36, 48, 80, 96];
+        let count = (seed % 8 + 1) as u8;
+        TestGresInventory {
+            hostname: hostname.clone(),
+            driver_version: Some(format!("test-driver-{seed}")),
+            gres: (0..count)
+                .map(|index| {
+                    let mem_gib =
+                        MEMORY_GIB[((seed + index as u64 * 3) as usize) % MEMORY_GIB.len()];
+                    TestGresInventoryResource {
+                        index,
+                        name: format!("NVIDIA Test GPU {index}"),
+                        uuid: Some(format!(
+                            "GRES-TEST-{}-{index:04}",
+                            sanitize_uuid_part(&hostname)
+                        )),
+                        memory_total_mb: mem_gib * 1024,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn snapshot_from_inventory_runtime(
+        inventory: &TestGresInventory,
+        runtime: &TestGresRuntimeState,
+    ) -> GresNodeSnapshot {
+        let runtime_by_index = runtime
+            .gres
+            .iter()
+            .map(|resource| (resource.index, resource))
+            .collect::<std::collections::HashMap<_, _>>();
+        GresNodeSnapshot {
+            hostname: inventory.hostname.clone(),
+            driver_version: inventory.driver_version.clone(),
+            resources: inventory
+                .gres
+                .iter()
+                .map(|resource| {
+                    let runtime = runtime_by_index.get(&resource.index);
+                    let used = runtime
+                        .map(|runtime| runtime.memory_used_mb)
+                        .unwrap_or_default()
+                        .min(resource.memory_total_mb);
+                    GresResource {
+                        kind: GresResourceKind::Nvml,
+                        index: resource.index,
+                        name: resource.name.clone(),
+                        uuid: resource.uuid.clone(),
+                        temperature_c: runtime.and_then(|runtime| runtime.temperature_c),
+                        memory_used_mb: used,
+                        memory_total_mb: resource.memory_total_mb,
+                        utilization_gres_percent: runtime
+                            .map(|runtime| runtime.utilization_gres_percent.min(100))
+                            .unwrap_or_default(),
+                        utilization_memory_percent: runtime
+                            .map(|runtime| runtime.utilization_memory_percent.min(100))
+                            .unwrap_or_default(),
+                        processes: runtime
+                            .map(|runtime| {
+                                runtime
+                                    .processes
+                                    .iter()
+                                    .map(|process| GresProcess {
+                                        pid: process.pid,
+                                        uid: process.uid,
+                                        used_memory_mb: process.used_memory_mb,
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn validate_inventory(inventory: &TestGresInventory) -> Result<(), String> {
+        if inventory.hostname.trim().is_empty() {
+            return Err("test inventory hostname must not be empty".to_string());
+        }
+        let snapshot = snapshot_from_inventory_runtime(inventory, &initial_runtime(inventory));
+        super::validate_gres_node_snapshot_contract(&snapshot)
+    }
+
+    fn sanitize_uuid_part(input: &str) -> String {
+        input
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn runtime_refresh_interval() -> Duration {
+        Duration::from_millis(DEFAULT_REFRESH_MS)
+    }
+
+    #[allow(dead_code)]
+    pub fn dump_runtime_json(path: impl AsRef<Path>) -> Result<String, String> {
+        let state = read_runtime_mmap(path)?;
+        serde_json::to_string_pretty(&state).map_err(|e| format!("encode runtime json failed: {e}"))
+    }
+
+    #[allow(dead_code)]
+    fn read_all(path: impl AsRef<Path>) -> Result<Vec<u8>, String> {
+        let mut file = File::open(path.as_ref())
+            .map_err(|e| format!("open {} failed: {}", path.as_ref().display(), e))?;
+        let mut out = Vec::new();
+        file.read_to_end(&mut out)
+            .map_err(|e| format!("read {} failed: {}", path.as_ref().display(), e))?;
+        Ok(out)
+    }
+
+    #[allow(dead_code)]
+    fn write_all(path: impl AsRef<Path>, data: &[u8]) -> Result<(), String> {
+        let mut file = File::create(path.as_ref())
+            .map_err(|e| format!("create {} failed: {}", path.as_ref().display(), e))?;
+        file.write_all(data)
+            .map_err(|e| format!("write {} failed: {}", path.as_ref().display(), e))
     }
 }
 
-#[cfg(test)]
-impl GresCollector for TestGresCollector {
-    fn collect_gres(&self) -> Result<GresNodeSnapshot, ErrorCode> {
-        Ok(GresNodeSnapshot::from_gres_snapshot(test_snapshot(
-            self.hostname.clone(),
-            self.gres_count,
-        )))
-    }
-}
+#[cfg(any(test, feature = "test-collector"))]
+#[allow(unused_imports)]
+pub use test_collector::{
+    deterministic_inventory, init_runtime_file, initial_runtime, read_inventory_file,
+    read_runtime_mmap, runtime_for_tick, start_runtime_writer, write_inventory_file,
+    write_runtime_mmap, RuntimeWriterHandle, TestGresCollector, TestGresInventory,
+    TestGresInventoryResource, TestGresRuntimeProcess, TestGresRuntimeResource,
+    TestGresRuntimeState,
+};
 
 #[cfg(test)]
 #[derive(Debug)]
@@ -204,7 +668,7 @@ pub fn assert_gres_collector_contract(collector: &dyn GresCollector) {
     );
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-collector"))]
 pub fn validate_gres_node_snapshot_contract(snapshot: &GresNodeSnapshot) -> Result<(), String> {
     if snapshot.hostname.trim().is_empty() {
         return Err("hostname must not be empty".to_string());
@@ -345,58 +809,6 @@ fn env_truthy(name: &str) -> bool {
     std::env::var(name)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
         .unwrap_or(false)
-}
-
-#[cfg(test)]
-fn test_snapshot(hostname: String, gres_count: u8) -> ServerGresSnapshot {
-    ServerGresSnapshot {
-        hostname: hostname.clone(),
-        driver_version: Some("test-driver".to_string()),
-        gres: (0..gres_count)
-            .map(|index| {
-                let index_u64 = index as u64;
-                GresInfo {
-                    index,
-                    name: format!("NVIDIA Test GPU {index}"),
-                    temperature_c: Some(30 + index as u32),
-                    uuid: Some(format!(
-                        "GRES-TEST-{}-{index:04}",
-                        sanitize_uuid_part(&hostname)
-                    )),
-                    memory: GresMemory {
-                        used_mb: 1_234 + index_u64 * 512,
-                        total_mb: 16_384 + index_u64 * 1_024,
-                    },
-                    utilization: GresUtilization {
-                        gres_percent: (87u16.saturating_sub(index as u16 * 7)).max(1) as u8,
-                        memory_percent: (8 + index).min(100),
-                    },
-                    processes: vec![
-                        GresProcessInfo {
-                            pid: 4_242 + index as u32 * 10,
-                            uid: 1000 + index as u32,
-                            command: Some(format!("python train_gres_{index}.py")),
-                            used_memory_mb: 768 + index_u64 * 128,
-                        },
-                        GresProcessInfo {
-                            pid: 4_243 + index as u32 * 10,
-                            uid: 2000 + index as u32,
-                            command: Some("nvidia-smi dmon".to_string()),
-                            used_memory_mb: 128,
-                        },
-                    ],
-                }
-            })
-            .collect(),
-    }
-}
-
-#[cfg(test)]
-fn sanitize_uuid_part(input: &str) -> String {
-    input
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect()
 }
 
 #[cfg(feature = "nvml")]
@@ -599,6 +1011,75 @@ mod tests {
         assert_eq!(snapshot.gres[0].processes.len(), 2);
         assert_eq!(snapshot.gres[1].processes.len(), 2);
         assert_eq!(snapshot.gres[1].processes[0].command, None);
+    }
+
+    #[test]
+    fn test_gres_collector_loads_inventory_json_and_runtime_mmap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let inventory_path = tmp.path().join("inventory.json");
+        let runtime_path = tmp.path().join("runtime.mmap");
+        let inventory = deterministic_inventory(42, "node-json".to_string());
+        write_inventory_file(&inventory_path, &inventory).expect("write inventory");
+
+        let collector = TestGresCollector::from_inventory_file(&inventory_path)
+            .expect("load inventory")
+            .with_runtime_path(&runtime_path);
+        init_runtime_file(&runtime_path, 64 * 1024).expect("init runtime");
+        write_runtime_mmap(&runtime_path, &runtime_for_tick(&inventory, 7)).expect("write runtime");
+
+        let snapshot = collector.collect_gres().expect("collect");
+        validate_gres_node_snapshot_contract(&snapshot).expect("contract");
+        assert_eq!(snapshot.hostname, "node-json");
+        assert_eq!(snapshot.resources.len(), inventory.gres.len());
+        assert_eq!(
+            snapshot.resources[0].memory_total_mb,
+            inventory.gres[0].memory_total_mb
+        );
+        assert_eq!(
+            snapshot.resources[0].memory_used_mb,
+            runtime_for_tick(&inventory, 7).gres[0].memory_used_mb
+        );
+    }
+
+    #[test]
+    fn test_gres_runtime_writer_updates_mmap_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runtime_path = tmp.path().join("runtime.mmap");
+        let inventory = deterministic_inventory(7, "node-runtime".to_string());
+        let collector = TestGresCollector::from_inventory(inventory.clone());
+        let writer = collector
+            .start_runtime_writer(&runtime_path, std::time::Duration::from_millis(5))
+            .expect("start writer");
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let first = read_runtime_mmap(&runtime_path).expect("read first runtime");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let second = read_runtime_mmap(&runtime_path).expect("read second runtime");
+        writer.stop();
+
+        assert_eq!(first.gres.len(), inventory.gres.len());
+        assert_eq!(second.gres.len(), inventory.gres.len());
+        assert_ne!(
+            first.gres[0].memory_used_mb, second.gres[0].memory_used_mb,
+            "runtime writer should update dynamic fields"
+        );
+    }
+
+    #[test]
+    fn deterministic_inventory_covers_expected_memory_sizes_and_counts() {
+        let allowed = [8, 16, 24, 36, 48, 80, 96]
+            .into_iter()
+            .map(|gib| gib * 1024)
+            .collect::<std::collections::HashSet<u64>>();
+        for seed in 0..64 {
+            let inventory = deterministic_inventory(seed, format!("node-{seed}"));
+            assert!((1..=8).contains(&inventory.gres.len()));
+            for resource in &inventory.gres {
+                assert!(allowed.contains(&resource.memory_total_mb));
+            }
+            let collector = TestGresCollector::from_inventory(inventory);
+            assert_gres_collector_contract(&collector);
+        }
     }
 
     #[test]

@@ -52,6 +52,12 @@ pub struct ServicesConfig {
 pub struct RuntimeConfig {
     #[serde(default)]
     pub nvml_lib_path: Option<String>,
+    #[serde(default)]
+    pub test_inventory_path: Option<String>,
+    #[serde(default)]
+    pub test_runtime_path: Option<String>,
+    #[serde(default)]
+    pub test_inventory_reload: bool,
 }
 
 /// 通用配置根结构。
@@ -148,5 +154,8 @@ latency_display = true
         assert!(cfg.services.latency_display);
         assert_eq!(cfg.services.uds_path, None);
         assert_eq!(cfg.runtime.nvml_lib_path, None);
+        assert_eq!(cfg.runtime.test_inventory_path, None);
+        assert_eq!(cfg.runtime.test_runtime_path, None);
+        assert!(!cfg.runtime.test_inventory_reload);
     }
 }

@@ -6,14 +6,22 @@ edition = "2021"
 [features]
 default = []
 nvml = ["dep:nvml-wrapper"]
+test-collector = ["dep:memmap2", "dep:serde"]
 
 [dependencies]
 common = { path = "../common" }
 anyhow = "1"
 toml = "0.8"
 
+serde = { version = "1", features = ["derive"], optional = true }
 serde_json = "1"
 base64 = "0.22"
 socket2 = "0.6"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 nvml-wrapper = { version = "0.10", optional = true }
+memmap2 = { version = "0.9", optional = true }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+memmap2 = "0.9"
+tempfile = "3"
