@@ -53,7 +53,7 @@ impl TransportContext {
     ) -> Result<Option<Vec<u8>>, TransportError> {
         match self
             .cache
-            .get_latest_or_refresh(self.collector.as_ref(), self.ttl_ms)
+            .get_or_refresh(self.collector.as_ref(), self.ttl_ms)
         {
             Ok(entry) => {
                 let runtime = RuntimeSnapshot::from_snapshot(entry.snapshot.as_ref());
@@ -177,7 +177,7 @@ impl TransportContext {
 
         match self
             .cache
-            .get_latest_or_refresh(self.collector.as_ref(), self.ttl_ms)
+            .get_or_refresh(self.collector.as_ref(), self.ttl_ms)
         {
             Ok(entry) => {
                 let runtime = RuntimeSnapshot::from_snapshot(entry.snapshot.as_ref());
@@ -278,6 +278,10 @@ mod tests {
         fail: Option<ErrorCode>,
     }
 
+    struct GrowingCollector {
+        calls: AtomicUsize,
+    }
+
     impl StaticCollector {
         fn new() -> Self {
             Self {
@@ -330,8 +334,42 @@ mod tests {
         }
     }
 
+    impl GresCollector for GrowingCollector {
+        fn collect_gres(&self) -> Result<crate::collector::GresNodeSnapshot, ErrorCode> {
+            let count = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let gres = (0..count)
+                .map(|idx| GresInfo {
+                    index: idx.min(u8::MAX as usize) as u8,
+                    name: "test-gres".to_string(),
+                    temperature_c: None,
+                    uuid: Some(format!("GRES-{idx}")),
+                    memory: GresMemory {
+                        used_mb: idx as u64,
+                        total_mb: 81920,
+                    },
+                    utilization: GresUtilization {
+                        gres_percent: 75,
+                        memory_percent: 10,
+                    },
+                    processes: Vec::new(),
+                })
+                .collect();
+            Ok(crate::collector::GresNodeSnapshot::from_gres_snapshot(
+                ServerGresSnapshot {
+                    hostname: "node-a".to_string(),
+                    driver_version: None,
+                    gres,
+                },
+            ))
+        }
+    }
+
     fn context(collector: Arc<dyn GresCollector>) -> TransportContext {
         TransportContext::new("node-a", collector, Arc::new(GresCache::new()), 1_000)
+    }
+
+    fn context_with_ttl(collector: Arc<dyn GresCollector>, ttl_ms: u64) -> TransportContext {
+        TransportContext::new("node-a", collector, Arc::new(GresCache::new()), ttl_ms)
     }
 
     fn request_frame(frame_type: FrameType, request_id: u64, payload: &[u8]) -> Vec<u8> {
@@ -404,6 +442,69 @@ mod tests {
         assert_eq!(runtime.gres.len(), 1);
         assert_eq!(runtime.gres[0].utilization.gres_percent, 87);
         assert_eq!(runtime.gres[0].memory_used_mb, 1234);
+    }
+
+    #[test]
+    fn query_frame_refreshes_expired_cache_entry() {
+        let ctx = context_with_ttl(
+            Arc::new(GrowingCollector {
+                calls: AtomicUsize::new(0),
+            }),
+            0,
+        );
+        let request = request_frame(
+            FrameType::QueryRequest,
+            31,
+            &serde_json::to_vec(&QueryRequest {
+                version: PROTOCOL_VERSION,
+                request_id: 201,
+            })
+            .expect("serialize query request"),
+        );
+
+        let first = ctx.handle_frame(&request).expect("first query");
+        let (_, first_payload) = common::decode_frame(&first).expect("decode first query");
+        let first_runtime = common::decode_runtime_payload(first_payload).expect("first runtime");
+        assert_eq!(first_runtime.gres.len(), 1);
+
+        let second = ctx.handle_frame(&request).expect("second query");
+        let (_, second_payload) = common::decode_frame(&second).expect("decode second query");
+        let second_runtime =
+            common::decode_runtime_payload(second_payload).expect("second runtime");
+        assert_eq!(second_runtime.gres.len(), 2);
+    }
+
+    #[test]
+    fn udp_empty_query_refreshes_expired_cache_entry() {
+        let ctx = context_with_ttl(
+            Arc::new(GrowingCollector {
+                calls: AtomicUsize::new(0),
+            }),
+            0,
+        );
+
+        let first = ctx
+            .handle_empty_query_udp_datagram(301, 4096)
+            .expect("first UDP query")
+            .expect("first datagram");
+        let first_frame = common::udp::decode_udp_single_chunk(&first)
+            .expect("decode first UDP datagram")
+            .expect("first frame");
+        let (_, first_payload) = common::decode_frame(&first_frame).expect("decode first frame");
+        let first_runtime = common::decode_runtime_payload(first_payload).expect("first runtime");
+        assert_eq!(first_runtime.gres.len(), 1);
+
+        let second = ctx
+            .handle_empty_query_udp_datagram(302, 4096)
+            .expect("second UDP query")
+            .expect("second datagram");
+        let second_frame = common::udp::decode_udp_single_chunk(&second)
+            .expect("decode second UDP datagram")
+            .expect("second frame");
+        let (_, second_payload) = common::decode_frame(&second_frame).expect("decode second frame");
+        let second_runtime =
+            common::decode_runtime_payload(second_payload).expect("second runtime");
+        assert_eq!(second_runtime.gres.len(), 2);
     }
 
     #[test]
