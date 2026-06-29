@@ -1,5 +1,5 @@
 FROM docker:27-dind
-RUN apk add --no-cache bash build-base ca-certificates curl git linux-headers pkgconfig python3
+RUN apk add --no-cache bash build-base ca-certificates curl gcompat git libc6-compat libgcc linux-headers pkgconfig python3
 ENV CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
