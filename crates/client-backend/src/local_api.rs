@@ -157,28 +157,29 @@ impl LocalApiState {
                         let _ = connection.disconnect("client duplicate session");
                         return;
                     }
-                    if let Some(existing) = connections
-                        .values()
-                        .find(|existing| existing.hostname() == connection.hostname())
+                    if let Some(existing_addr) = connections
+                        .iter()
+                        .find(|(_, existing)| existing.hostname() == connection.hostname())
+                        .map(|(addr, _)| *addr)
                     {
+                        let existing = connections.remove(&existing_addr).expect("existing addr");
                         logger::transport_info(
                             connection.protocol(),
                             format!(
-                                "event=duplicate_host_ignored addr={} hostname={} existing_addr={}",
+                                "event=duplicate_host_replaced addr={} hostname={} old_addr={}",
                                 connection.addr(),
                                 connection.hostname(),
                                 existing.addr()
                             ),
                         );
-                        let _ = connection.disconnect("client duplicate hostname");
+                        let _ = existing.disconnect("client duplicate hostname replaced");
                         if let Ok(mut rows) = self.cache.lock() {
                             rows.remove(&format!(
                                 "{}-{}",
-                                connection.addr().ip(),
-                                connection.addr().port()
+                                existing.addr().ip(),
+                                existing.addr().port()
                             ));
                         }
-                        return;
                     }
                     if connections.len() >= self.max_connections {
                         let _ = connection.disconnect("client max connections reached");
