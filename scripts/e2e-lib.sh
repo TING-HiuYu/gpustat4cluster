@@ -405,6 +405,25 @@ if not data.startswith(b"OK shutdown"):
 PY
 }
 
+request_backend_disconnect_host() {
+  local uds="$1" hostname="$2"
+  python3 - "$uds" "$hostname" <<'PY'
+import socket, sys
+uds, hostname = sys.argv[1], sys.argv[2]
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+    s.connect(uds)
+    s.sendall(f"DISCONNECT_HOST {hostname}\n".encode())
+    data = b""
+    while not data.endswith(b"\n"):
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+if not data.startswith(b"OK disconnect_host"):
+    raise SystemExit(f"unexpected disconnect_host response: {data!r}")
+PY
+}
+
 assert_server_disconnect_seen() {
   local log="$1" protocol="$2" deadline=$((SECONDS + 5))
   local pattern

@@ -87,9 +87,13 @@ PY
 )
 remaining=()
 for idx in "${disconnect_indices[@]}"; do
+  hostname="scale-node-$((idx + 1))"
+  for uds in "${backend_sockets[@]}"; do
+    request_backend_disconnect_host "$uds" "$hostname"
+  done
   [[ -n "${server_handles[$idx]}" ]] && stop_e2e_pid "${server_handles[$idx]}"
 done
-sleep 6
+sleep 1
 for idx in "${!inventories[@]}"; do
   skip=0
   for gone in "${disconnect_indices[@]}"; do [[ "$idx" == "$gone" ]] && skip=1; done

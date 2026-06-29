@@ -346,6 +346,59 @@ impl LocalApiState {
             }
         }
     }
+
+    #[cfg(feature = "test-api")]
+    pub fn disconnect_hostname(&self, hostname: &str, reason: &str) -> usize {
+        let addrs = self
+            .connections
+            .lock()
+            .map(|connections| {
+                connections
+                    .iter()
+                    .filter(|(_, connection)| connection.hostname() == hostname)
+                    .map(|(addr, _)| *addr)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let mut disconnected = 0;
+        for addr in &addrs {
+            let connection = self
+                .connections
+                .lock()
+                .ok()
+                .and_then(|mut connections| connections.remove(addr));
+            if let Some(connection) = connection {
+                logger::transport_info(
+                    connection.protocol(),
+                    format!(
+                        "event=disconnect_send addr={} hostname={} reason={}",
+                        connection.addr(),
+                        connection.hostname(),
+                        reason
+                    ),
+                );
+                if let Err(e) = connection.disconnect(reason) {
+                    logger::transport_warn(
+                        connection.protocol(),
+                        format!(
+                            "event=disconnect_failed addr={} hostname={} error={}",
+                            connection.addr(),
+                            connection.hostname(),
+                            e
+                        ),
+                    );
+                }
+                disconnected += 1;
+            }
+        }
+
+        if let Ok(mut rows) = self.cache.lock() {
+            rows.retain(|_, entry| entry.hostname != hostname);
+        }
+
+        disconnected
+    }
 }
 
 pub fn serve(state: LocalApiState, configured_uds_path: Option<&str>) -> Result<(), String> {
@@ -486,6 +539,19 @@ pub(crate) fn handle_command(cmd: &str, state: &LocalApiState) -> Result<String,
         };
         state.shutdown(reason);
         return Ok("OK shutdown\n".to_string());
+    }
+
+    #[cfg(feature = "test-api")]
+    if let Some(hostname) = cmd.strip_prefix("DISCONNECT_HOST") {
+        let hostname = hostname.trim();
+        if hostname.is_empty() {
+            return Ok("ERR missing hostname\n".to_string());
+        }
+        let count = state.disconnect_hostname(hostname, "e2e host disconnect");
+        return Ok(format!(
+            "OK disconnect_host hostname={} count={}\n",
+            hostname, count
+        ));
     }
 
     Ok(format!("ERR unsupported command: {}\n", cmd))
