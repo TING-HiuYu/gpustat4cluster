@@ -239,6 +239,120 @@ start_backend() {
   E2E_PIDS+=("$!")
 }
 
+
+start_backend_pid() {
+  local config="$1" static_nodes="$2" log="$3"
+  if [[ "$E2E_NODE_MODE" == "docker" ]]; then
+    local container_name translated_static_nodes
+    container_name="$(backend_container_name "$config")"
+    register_server_configs_from_tmp
+    translated_static_nodes="$(translate_static_nodes "$static_nodes")"
+    if [[ -n "$translated_static_nodes" ]]; then
+      start_container "backend" "$container_name" "$log" GPUSTAT4CLUSTER_CONFIG="$config" GPUSTAT4CLUSTER_STATIC_NODES="$translated_static_nodes" "$BACKEND_BIN"
+    else
+      start_container "backend" "$container_name" "$log" GPUSTAT4CLUSTER_CONFIG="$config" "$BACKEND_BIN"
+    fi
+    E2E_LAST_PID="$container_name"
+    return
+  fi
+  if [[ -n "$static_nodes" ]]; then
+    GPUSTAT4CLUSTER_CONFIG="$config" GPUSTAT4CLUSTER_STATIC_NODES="$static_nodes" "$BACKEND_BIN" >"$log" 2>&1 &
+  else
+    GPUSTAT4CLUSTER_CONFIG="$config" "$BACKEND_BIN" >"$log" 2>&1 &
+  fi
+  local pid="$!"
+  E2E_PIDS+=("$pid")
+  E2E_LAST_PID="$pid"
+}
+
+write_expected_manifest() {
+  local out="$1"
+  shift
+  python3 - "$out" "$@" <<'PY'
+import json, sys
+out = sys.argv[1]
+nodes = []
+for path in sys.argv[2:]:
+    with open(path, encoding='utf-8') as f:
+        node = json.load(f)
+    nodes.append({'hostname': node.get('hostname'), 'driver_version': node.get('driver_version'), 'gres': node.get('gres', [])})
+with open(out, 'w', encoding='utf-8') as f:
+    json.dump({'nodes': sorted(nodes, key=lambda n: n.get('hostname') or '')}, f, sort_keys=True)
+PY
+}
+
+compare_inventory_json() {
+  local obtained="$1" expected="$2"
+  python3 - "$obtained" "$expected" <<'PY'
+import json, sys
+obtained_path, expected_path = sys.argv[1], sys.argv[2]
+def norm_gres(gres):
+    return sorted([{k: g.get(k) for k in ('index','name','uuid','memory_total_mb')} for g in (gres or [])], key=lambda g: (g.get('index', -1), g.get('uuid') or ''))
+def load_nodes(path):
+    with open(path, encoding='utf-8') as f:
+        data = json.load(f)
+    return {n.get('hostname'): norm_gres(n.get('gres', [])) for n in data.get('nodes', [])}
+obt, exp = load_nodes(obtained_path), load_nodes(expected_path)
+messages=[]
+for name in sorted(set(exp) | set(obt)):
+    if name not in obt:
+        messages.append(f"expected {name} with {exp[name]} but obtained <missing node>")
+    elif name not in exp:
+        messages.append(f"expected <absent node> but obtained {name} with {obt[name]}")
+    elif exp[name] != obt[name]:
+        messages.append(f"expected {name} with {exp[name]} but obtained {obt[name]}")
+if messages:
+    print(f"FAIL: obtained {len(messages)} result not matching expected outcome:", file=sys.stderr)
+    for i, msg in enumerate(messages, 1):
+        print(f"{i}: {msg}", file=sys.stderr)
+    sys.exit(1)
+print("PASS: result obtained equals to result expected", file=sys.stderr)
+PY
+}
+
+query_inventory_until() {
+  local uds="$1" expected_json="$2" out="$3" deadline=$((SECONDS + 20))
+  while (( SECONDS < deadline )); do
+    if GPUSTAT4CLUSTER_BACKEND_SOCKET="$uds" "$CLIENT_BIN" --json >"$out" 2>"$out.err"; then
+      if compare_inventory_json "$out" "$expected_json" >>"$out.err" 2>&1; then
+        cat "$out.err" >&2
+        return 0
+      fi
+    fi
+    sleep 0.2
+  done
+  echo "query did not reach expected inventory $expected_json" >&2
+  [[ -f "$out" ]] && cat "$out" >&2 || true
+  [[ -f "$out.err" ]] && cat "$out.err" >&2 || true
+  return 1
+}
+
+assert_query_latency() {
+  local uds="$1" max_first_us="$2" avg_max_us="$3" out="$4"
+  python3 - "$CLIENT_BIN" "$uds" "$max_first_us" "$avg_max_us" "$out" <<'PY'
+import os, subprocess, sys, time
+client, uds, first_limit, avg_limit, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+env = os.environ.copy(); env['GPUSTAT4CLUSTER_BACKEND_SOCKET'] = uds
+samples=[]
+for i in range(11):
+    start=time.perf_counter_ns()
+    cp=subprocess.run([client, '--json'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    dur=(time.perf_counter_ns()-start)//1000
+    if cp.returncode:
+        sys.stderr.write(cp.stderr.decode(errors='replace')); sys.exit(cp.returncode)
+    if i==0:
+        open(out, 'wb').write(cp.stdout)
+        if dur > first_limit:
+            print(f"latency first query {dur}us exceeds limit {first_limit}us", file=sys.stderr); sys.exit(1)
+    else:
+        samples.append(dur)
+avg=sum(samples)//len(samples)
+print(f"latency first_ok<= {first_limit}us avg_10={avg}us limit={avg_limit}us", file=sys.stderr)
+if avg > avg_limit:
+    sys.exit(1)
+PY
+}
+
 stop_e2e_pid() {
   local pid="$1"
   if [[ "$E2E_NODE_MODE" == "docker" && ! "$pid" =~ ^[0-9]+$ ]]; then
@@ -493,5 +607,5 @@ make_single_fixture() {
   count="$(write_inventory "$inventory" "node-$name" "$seed")"
   write_server_config "$server_config" "$tcp_port" "$udp_port" "$multicast" "$inventory" "$runtime" false "$protocol"
   write_client_config "$client_config" "$uds" "$multicast" "$protocol"
-  echo "$dir|$tcp_port|$udp_port|$multicast|$server_config|$client_config|$uds|$count"
+  echo "$dir|$tcp_port|$udp_port|$multicast|$inventory|$server_config|$client_config|$uds|$count"
 }

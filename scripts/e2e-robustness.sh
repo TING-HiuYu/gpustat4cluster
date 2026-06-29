@@ -271,11 +271,97 @@ scenario_dynamic_scale_robustness() {
   done
 }
 
+scenario_exception_matrix() {
+  local matrix_dir="$E2E_TMP_ROOT/robust-exception-matrix"
+  mkdir -p "$matrix_dir"
+  read -r mcast_port < <(alloc_ports 1)
+  local multicast="239.255.0.246:$mcast_port"
+  local groups=4
+  for g in $(seq 0 $((groups - 1))); do
+    local dir="$matrix_dir/group-$g"
+    mkdir -p "$dir"
+    local server_configs=() server_handles=() inventories=() alive=()
+    local backend_configs=() backend_sockets=() backend_handles=()
+    # Event structure template: side,event,change.tcp,change.udp,change.gres-function.
+    cat >"$dir/events.json" <<JSON
+[
+  {"side":"server","event":"runtime_shrink","change":{"tcp":0,"udp":0,"gres":"lambda gres: gres[:max(1, len(gres)-1)]"}},
+  {"side":"server","event":"abnormal_disconnect","change":{"tcp":-1,"udp":-1,"gres":"lambda gres: []"}},
+  {"side":"client","event":"tcp_abnormal_disconnect","change":{"tcp":-1,"udp":0,"gres":"lambda gres: gres"}},
+  {"side":"client","event":"udp_abnormal_disconnect","change":{"tcp":0,"udp":-1,"gres":"lambda gres: gres"}}
+]
+JSON
+    for i in $(seq 0 2); do
+      read -r tcp_port udp_port < <(alloc_ports 2)
+      local sdir="$dir/server-$i"
+      mkdir -p "$sdir"
+      local inventory="$sdir/inventory.json"
+      local runtime="$sdir/runtime.mmap"
+      local server_config="$sdir/server.toml"
+      write_inventory_count "$inventory" "server-$g-$i" $((4 + i)) $((1200 + g * 10 + i)) >/dev/null
+      write_server_config "$server_config" "$tcp_port" "$udp_port" "$multicast" "$inventory" "$runtime" true udp
+      server_configs+=("$server_config|$sdir/server.log")
+      server_handles+=("")
+      inventories+=("$inventory")
+      alive+=(1)
+    done
+    for i in $(seq 0 3); do
+      local bdir="$dir/client-$i"
+      mkdir -p "$bdir"
+      local uds="$bdir/client.sock"
+      local client_config="$bdir/client.toml"
+      local protocol="udp"
+      (( i < 2 )) && protocol="tcp"
+      write_client_config "$client_config" "$uds" "$multicast" "$protocol"
+      backend_configs+=("$client_config|$bdir/backend.log|$protocol")
+      backend_sockets+=("$uds")
+      backend_handles+=("")
+    done
+    for action in "server:0" "client:0" "server:1" "client:2" "runtime:0" "server:2" "client:1" "client:3" "server_disconnect:1" "client_disconnect:2"; do
+      IFS=':' read -r kind idx <<<"$action"
+      case "$kind" in
+        server)
+          IFS='|' read -r cfg log <<<"${server_configs[$idx]}"
+          start_server_pid "$cfg" "$log"; server_handles[$idx]="$E2E_LAST_PID" ;;
+        client)
+          IFS='|' read -r cfg log _proto <<<"${backend_configs[$idx]}"
+          start_backend_pid "$cfg" "" "$log"; backend_handles[$idx]="$E2E_LAST_PID" ;;
+        runtime)
+          write_inventory_count "${inventories[$idx]}" "server-$g-$idx" 2 $((1300 + g * 10 + idx)) >/dev/null ;;
+        server_disconnect)
+          stop_e2e_pid "${server_handles[$idx]}"; alive[$idx]=0 ;;
+        client_disconnect)
+          stop_e2e_pid "${backend_handles[$idx]}"; backend_handles[$idx]="" ;;
+      esac
+      sleep 0.15
+    done
+    sleep 6
+    local expected_items=()
+    for idx in "${!inventories[@]}"; do
+      (( alive[$idx] == 1 )) && expected_items+=("${inventories[$idx]}")
+    done
+    local expected="$dir/expected.json"
+    write_expected_manifest "$expected" "${expected_items[@]}"
+    local checked=0
+    for idx in "${!backend_sockets[@]}"; do
+      if [[ -n "${backend_handles[$idx]}" ]]; then
+        wait_for_socket "${backend_sockets[$idx]}"
+        query_inventory_until "${backend_sockets[$idx]}" "$expected" "$dir/query-$idx.json"
+        checked=1
+      fi
+    done
+    if (( checked == 0 )); then
+      record_failure "robust-exception-matrix" "$dir" "all clients disconnected before validation"
+    fi
+  done
+}
+
 register_scenario scenario_expand_inventory
 register_scenario scenario_shrink_inventory
 register_scenario scenario_collector_error_recovery
 register_scenario scenario_network_outage_recovery
 register_scenario scenario_dynamic_scale_robustness
+register_scenario scenario_exception_matrix
 
 run_registered_scenarios
 
