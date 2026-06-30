@@ -117,7 +117,7 @@ pub trait GresCollector: Send + Sync {
     }
 }
 
-#[cfg(any(test, feature = "test-collector"))]
+#[cfg(any(test, feature = "debug"))]
 mod test_collector {
     use super::*;
     use memmap2::{Mmap, MmapMut};
@@ -612,7 +612,7 @@ mod test_collector {
     }
 }
 
-#[cfg(any(test, feature = "test-collector"))]
+#[cfg(any(test, feature = "debug"))]
 #[allow(unused_imports)]
 pub use test_collector::{
     deterministic_inventory, init_runtime_file, initial_runtime, read_inventory_file,
@@ -668,7 +668,7 @@ pub fn assert_gres_collector_contract(collector: &dyn GresCollector) {
     );
 }
 
-#[cfg(any(test, feature = "test-collector"))]
+#[cfg(any(test, feature = "debug"))]
 pub fn validate_gres_node_snapshot_contract(snapshot: &GresNodeSnapshot) -> Result<(), String> {
     if snapshot.hostname.trim().is_empty() {
         return Err("hostname must not be empty".to_string());

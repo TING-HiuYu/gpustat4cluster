@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 default = []
+debug = []
 
 [[bin]]
 name = "gpustat4cluster-client-backend"
