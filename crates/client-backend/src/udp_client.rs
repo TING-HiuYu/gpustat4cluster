@@ -9,8 +9,8 @@ use std::{
 
 use common::{
     udp::{
-        decode_udp_single_chunk, decode_udp_single_chunk_ref, effective_udp_payload_capacity,
-        encode_udp_chunks, encode_udp_single_chunk, UdpFrameReassembler,
+        decode_udp_single_chunk, effective_udp_payload_capacity, encode_udp_chunks,
+        encode_udp_single_chunk, UdpFrameReassembler,
     },
     FrameType, HostMetadata, ServerGresSnapshot,
 };
@@ -155,12 +155,27 @@ pub fn query_connected(
         .lock()
         .map_err(|_| UdpClientError::Io("udp connection lock poisoned".to_string()))?;
     send_empty_query(&io.socket, request_id)?;
-    let metadata = node
+    let runtime = recv_query_runtime(&mut io, request_id, connection_idle_timeout)?;
+    let mut metadata = node
         .metadata
         .lock()
         .map_err(|_| UdpClientError::Io("udp metadata lock poisoned".to_string()))?
         .clone();
-    recv_query_reply(&mut io, request_id, connection_idle_timeout, &metadata)
+    if runtime.metadata_hash != 0 && runtime.metadata_hash != metadata.metadata_hash() {
+        let refreshed = refresh_metadata(
+            &mut io,
+            node.next_id(),
+            connection_idle_timeout,
+            node.max_payload,
+        )?;
+        *node
+            .metadata
+            .lock()
+            .map_err(|_| UdpClientError::Io("udp metadata lock poisoned".to_string()))? =
+            refreshed.clone();
+        metadata = refreshed;
+    }
+    Ok(runtime.to_snapshot(&metadata))
 }
 
 fn send_empty_query(socket: &UdpSocket, request_id: u64) -> Result<(), UdpClientError> {
@@ -246,59 +261,38 @@ fn recv_frame(
     ))
 }
 
-fn recv_query_reply(
+fn recv_query_runtime(
     io: &mut UdpIo,
     request_id: u64,
     timeout: Duration,
-    metadata: &HostMetadata,
-) -> Result<ServerGresSnapshot, UdpClientError> {
-    let deadline = Instant::now() + timeout;
-    let mut reassembler = None;
-    while Instant::now() < deadline
-        && reassembler
-            .as_ref()
-            .is_none_or(|reassembler: &UdpFrameReassembler| !reassembler.is_expired())
-    {
-        match io.socket.recv(&mut io.recv_buf) {
-            Ok(n) => {
-                if let Some(frame) = decode_udp_single_chunk_ref(&io.recv_buf[..n])
-                    .map_err(|e| UdpClientError::Decode(format!("{e:?}")))?
-                {
-                    let (header, _) = common::decode_frame(frame)
-                        .map_err(|e| UdpClientError::Decode(format!("{e:?}")))?;
-                    if header.request_id == request_id {
-                        return parse_query_reply(frame, metadata);
-                    }
-                    continue;
-                }
-                let reassembler =
-                    reassembler.get_or_insert_with(|| UdpFrameReassembler::new(timeout));
-                match reassembler.insert(&io.recv_buf[..n]) {
-                    Ok(Some(frame)) => {
-                        let (header, _) = common::decode_frame(&frame)
-                            .map_err(|e| UdpClientError::Decode(format!("{e:?}")))?;
-                        if header.request_id == request_id {
-                            return parse_query_reply(&frame, metadata);
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => return Err(UdpClientError::Decode(format!("{e:?}"))),
-                }
+) -> Result<common::RuntimeSnapshot, UdpClientError> {
+    let frame = recv_frame(io, request_id, timeout)?;
+    match transport::parse_runtime_payload_frame(&frame) {
+        Ok(runtime) => Ok(runtime),
+        Err(err) => {
+            let empty_metadata = HostMetadata {
+                hostname: String::new(),
+                driver_version: None,
+                gres: Vec::new(),
+            };
+            match parse_query_reply(&frame, &empty_metadata) {
+                Ok(_) => Err(UdpClientError::Transport(err)),
+                Err(e) => Err(e),
             }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                return Err(UdpClientError::Io(
-                    "timeout while waiting for UDP frame".to_string(),
-                ));
-            }
-            Err(e) => return Err(UdpClientError::Io(format!("recv UDP chunk failed: {e}"))),
         }
     }
-    Err(UdpClientError::Io(
-        "timeout while reassembling UDP frame".to_string(),
-    ))
+}
+
+fn refresh_metadata(
+    io: &mut UdpIo,
+    request_id: u64,
+    timeout: Duration,
+    max_payload: usize,
+) -> Result<HostMetadata, UdpClientError> {
+    let frame = transport::build_handshake_request_frame(request_id)?;
+    send_frame(&io.socket, &frame, max_payload)?;
+    let response = recv_frame(io, request_id, timeout)?;
+    parse_handshake_reply(&response)
 }
 
 fn set_timeout(socket: &UdpSocket, timeout: Duration) {

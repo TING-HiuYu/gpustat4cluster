@@ -136,13 +136,32 @@ pub fn query_connected(
         .map_err(|e| TcpClientError::Io(format!("flush query failed: {e}")))?;
 
     let query_resp = read_frame(&mut stream)?;
-    let metadata = node
+    let runtime = match transport::parse_runtime_payload_frame(&query_resp) {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            let metadata = node
+                .metadata
+                .lock()
+                .map_err(|_| TcpClientError::Io("tcp metadata lock poisoned".to_string()))?
+                .clone();
+            return parse_query_reply(&query_resp, &metadata);
+        }
+    };
+
+    let mut metadata = node
         .metadata
         .lock()
         .map_err(|_| TcpClientError::Io("tcp metadata lock poisoned".to_string()))?
         .clone();
-    let snapshot = parse_query_reply(&query_resp, &metadata)?;
-    Ok(snapshot)
+    if runtime.metadata_hash != 0 && runtime.metadata_hash != metadata.metadata_hash() {
+        metadata = refresh_metadata(&mut stream)?;
+        *node
+            .metadata
+            .lock()
+            .map_err(|_| TcpClientError::Io("tcp metadata lock poisoned".to_string()))? =
+            metadata.clone();
+    }
+    Ok(runtime.to_snapshot(&metadata))
 }
 
 pub fn close_connected(node: &ConnectedTcpNode) {
@@ -174,6 +193,18 @@ fn read_frame(stream: &mut TcpStream) -> Result<Vec<u8>, TcpClientError> {
         frame.extend_from_slice(&payload);
     }
     Ok(frame)
+}
+
+fn refresh_metadata(stream: &mut TcpStream) -> Result<HostMetadata, TcpClientError> {
+    let frame = transport::build_handshake_request_frame(3)?;
+    stream
+        .write_all(&frame)
+        .map_err(|e| TcpClientError::Io(format!("send metadata refresh failed: {e}")))?;
+    stream
+        .flush()
+        .map_err(|e| TcpClientError::Io(format!("flush metadata refresh failed: {e}")))?;
+    let response = read_frame(stream)?;
+    parse_handshake_reply(&response)
 }
 
 fn parse_handshake_reply(frame: &[u8]) -> Result<HostMetadata, TcpClientError> {
