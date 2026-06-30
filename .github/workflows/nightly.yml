@@ -44,21 +44,21 @@ jobs:
       - name: Run cargo test
         run: cargo test --workspace
 
-      - name: Run test-collector cargo test
-        run: cargo test -p server --features test-collector --no-default-features
+      - name: Run debug cargo test
+        run: cargo test -p server --features debug --no-default-features
 
       - name: Build production binaries
         run: |
           cargo build --locked --release -p server --features nvml
           cargo build --locked --release -p gpustat4cluster-client-backend -p gpustat4cluster-client-cli
 
-      - name: Build test-collector server binary
-        run: cargo build --locked -p server --features test-collector --no-default-features
+      - name: Build debug server binary
+        run: cargo build --locked -p server --features debug --no-default-features
 
       - name: Build e2e test binaries
         run: |
-          cargo build --locked --release -p server --features test-collector --no-default-features
-          cargo build --locked --release -p gpustat4cluster-client-backend --features test-api
+          cargo build --locked --release -p server --features debug --no-default-features
+          cargo build --locked --release -p gpustat4cluster-client-backend --features debug
           cargo build --locked --release -p gpustat4cluster-client-cli
           mkdir -p e2e-bin
           cp target/release/server e2e-bin/server
@@ -125,16 +125,18 @@ jobs:
           scripts/e2e-docker-run.sh ${{ matrix.script }}
 
   e2e-dynamic-scale:
-    name: e2e dynamic scale ${{ matrix.protocol }}
+    name: e2e dynamic scale group ${{ matrix.group }}
     needs: e2e-basic-tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        protocol:
-          - tcp
-          - udp
+        group:
+          - 0
+          - 1
+          - 2
+          - 3
     steps:
       - name: Checkout push target
         if: github.event_name != 'workflow_dispatch'
@@ -155,9 +157,9 @@ jobs:
       - name: Prepare e2e test binaries
         run: chmod +x e2e-bin/*
 
-      - name: Run e2e dynamic scale ${{ matrix.protocol }}
+      - name: Run e2e dynamic scale group ${{ matrix.group }}
         run: |
-          E2E_PROTOCOL=${{ matrix.protocol }} \
+          E2E_SCALE_GROUP=${{ matrix.group }} \
           E2E_SKIP_BUILD=1 \
           SERVER_BIN=/work/e2e-bin/server \
           BACKEND_BIN=/work/e2e-bin/gpustat4cluster-client-backend \
@@ -165,7 +167,7 @@ jobs:
           scripts/e2e-docker-run.sh scripts/e2e-dynamic-scale.sh
 
   e2e-robustness:
-    name: e2e robustness mixed tcp udp group ${{ matrix.group }}
+    name: e2e robustness group ${{ matrix.group }}
     needs: e2e-dynamic-scale
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -177,6 +179,10 @@ jobs:
           - 1
           - 2
           - 3
+          - 4
+          - 5
+          - 6
+          - 7
     steps:
       - name: Checkout push target
         if: github.event_name != 'workflow_dispatch'

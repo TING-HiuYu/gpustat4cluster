@@ -6,7 +6,7 @@ edition = "2021"
 [features]
 default = []
 nvml = ["dep:nvml-wrapper"]
-test-collector = ["dep:memmap2", "dep:serde"]
+debug = ["dep:memmap2", "dep:serde"]
 
 [dependencies]
 common = { path = "../common" }

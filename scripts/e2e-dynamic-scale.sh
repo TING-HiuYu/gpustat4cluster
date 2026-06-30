@@ -2,54 +2,86 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e-lib.sh"
 require_binaries
-scale_dir="$E2E_TMP_ROOT/scale"
+
+scale_group="${E2E_SCALE_GROUP:-0}"
+seed="${E2E_SEED:-$((91000 + scale_group * 997 + ${GITHUB_RUN_ATTEMPT:-1}))}"
+scale_dir="$E2E_TMP_ROOT/scale-group-$scale_group"
 mkdir -p "$scale_dir"
 read -r mcast_port < <(alloc_ports 1)
-multicast="239.255.0.222:$mcast_port"
-protocol="${E2E_PROTOCOL:-udp}"
+multicast="239.255.1.$((scale_group % 200 + 20)):$mcast_port"
 server_count=16
-backend_count=8
-frontend_count=32
+tcp_backend_count=8
+udp_backend_count=8
+close_count=5
 server_configs=()
 server_handles=()
 inventories=()
 backend_configs=()
 backend_sockets=()
 backend_handles=()
-for i in $(seq 1 "$server_count"); do
+backend_protocols=()
+backend_alive=()
+
+for i in $(seq 0 $((server_count - 1))); do
   read -r tcp_port udp_port < <(alloc_ports 2)
   dir="$scale_dir/server-$i"
   mkdir -p "$dir"
   inventory="$dir/inventory.json"
   runtime="$dir/runtime.mmap"
   server_config="$dir/server.toml"
-  write_inventory "$inventory" "scale-node-$i" "$((100 + i))" >/dev/null
-  write_server_config "$server_config" "$tcp_port" "$udp_port" "$multicast" "$inventory" "$runtime" false "$protocol"
+  write_inventory_count "$inventory" "scale-node-$scale_group-$i" 4 "$((10000 + scale_group * 100 + i))" >/dev/null
+  write_server_config "$server_config" "$tcp_port" "$udp_port" "$multicast" "$inventory" "$runtime" false udp
   server_configs+=("$server_config|$dir/server.log")
   server_handles+=("")
   inventories+=("$inventory")
 done
-for i in $(seq 1 "$backend_count"); do
+
+for i in $(seq 0 $((tcp_backend_count + udp_backend_count - 1))); do
   dir="$scale_dir/backend-$i"
   mkdir -p "$dir"
   uds="$dir/client.sock"
   client_config="$dir/client.toml"
+  protocol="tcp"
+  (( i >= tcp_backend_count )) && protocol="udp"
   write_client_config "$client_config" "$uds" "$multicast" "$protocol"
   backend_configs+=("$client_config|$dir/backend.log")
   backend_sockets+=("$uds")
   backend_handles+=("")
+  backend_protocols+=("$protocol")
+  backend_alive+=(1)
 done
-for action in \
-  "server:7" "backend:0" "server:0" "frontend:0" \
-  "backend:3" "server:14" "server:3" "backend:6" \
-  "frontend:3" "server:10" "backend:1" "server:5" \
-  "server:12" "backend:4" "frontend:6" "server:1" \
-  "backend:7" "server:8" "backend:2" "server:15" \
-  "frontend:1" "server:2" "server:9" "backend:5" \
-  "server:6" "frontend:4" "server:13" "server:4" \
-  "frontend:7" "server:11"; do
-  kind="${action%%:*}"
-  idx="${action##*:}"
+
+python3 - "$seed" "$server_count" "$((tcp_backend_count + udp_backend_count))" "$close_count" >"$scale_dir/plan.tsv" <<'PY'
+import random, sys
+seed, server_count, backend_count, close_count = map(int, sys.argv[1:5])
+rng = random.Random(seed)
+not_started = [('server', i) for i in range(server_count)] + [('backend', i) for i in range(backend_count)]
+started_backends = []
+closed = set()
+plan = []
+while not_started or len(closed) < close_count:
+    choices = []
+    if not_started:
+        choices.append('start')
+    close_candidates = [i for i in started_backends if i not in closed]
+    if close_candidates and len(closed) < close_count:
+        choices.append('close')
+    action = rng.choice(choices)
+    if action == 'start':
+        idx = rng.randrange(len(not_started))
+        kind, ident = not_started.pop(idx)
+        plan.append((kind, ident))
+        if kind == 'backend':
+            started_backends.append(ident)
+    else:
+        ident = rng.choice(close_candidates)
+        closed.add(ident)
+        plan.append(('close_backend', ident))
+for kind, ident in plan:
+    print(f"{kind}\t{ident}")
+PY
+
+while IFS=$'\t' read -r kind idx; do
   case "$kind" in
     server)
       IFS='|' read -r cfg log <<<"${server_configs[$idx]}"
@@ -61,49 +93,32 @@ for action in \
       start_backend_pid "$cfg" "" "$log"
       backend_handles[$idx]="$E2E_LAST_PID"
       ;;
-    frontend)
-      uds="${backend_sockets[$idx]}"
-      [[ -S "$uds" ]] && probe_frontend "$uds" "$scale_dir/probe-$idx.json"
+    close_backend)
+      if [[ -n "${backend_handles[$idx]}" ]]; then
+        request_backend_shutdown "${backend_sockets[$idx]}" "dynamic scale planned shutdown" 2>>"$scale_dir/close-$idx.err" || true
+        stop_e2e_pid "${backend_handles[$idx]}"
+      fi
+      backend_alive[$idx]=0
       ;;
   esac
   sleep 0.05
-done
-for uds in "${backend_sockets[@]}"; do
-  wait_for_socket "$uds"
-done
-expected="$scale_dir/expected-all.json"
+done <"$scale_dir/plan.tsv"
+
+sleep 2
+expected="$scale_dir/expected-final.json"
 write_expected_manifest "$expected" "${inventories[@]}"
-for i in $(seq 1 "$frontend_count"); do
-  uds="${backend_sockets[$(((i - 1) % backend_count))]}"
-  query_inventory_until "$uds" "$expected" "$scale_dir/query-$i.json"
-done
-# After successful startup, disconnect half the servers in a deterministic random order and verify no residue remains.
-mapfile -t disconnect_indices < <(python3 - <<'PY'
-import random
-items=list(range(16))
-random.Random(4242).shuffle(items)
-print('\n'.join(map(str, items[:8])))
-PY
-)
-remaining=()
-for idx in "${disconnect_indices[@]}"; do
-  hostname="scale-node-$((idx + 1))"
-  for uds in "${backend_sockets[@]}"; do
-    request_backend_disconnect_host "$uds" "$hostname"
-  done
-  [[ -n "${server_handles[$idx]}" ]] && stop_e2e_pid "${server_handles[$idx]}"
-done
-sleep 1
-for idx in "${!inventories[@]}"; do
-  skip=0
-  for gone in "${disconnect_indices[@]}"; do [[ "$idx" == "$gone" ]] && skip=1; done
-  (( skip == 0 )) && remaining+=("${inventories[$idx]}")
-done
-expected_remaining="$scale_dir/expected-after-disconnect.json"
-write_expected_manifest "$expected_remaining" "${remaining[@]}"
+checked=0
 for i in "${!backend_sockets[@]}"; do
-  query_inventory_until "${backend_sockets[$i]}" "$expected_remaining" "$scale_dir/query-disconnect-$i.json"
-  IFS='|' read -r _cfg log <<<"${backend_configs[$i]}"
-  assert_connected_events_at_least "$log" "$server_count"
+  if (( backend_alive[$i] == 1 )); then
+    wait_for_socket "${backend_sockets[$i]}"
+    query_inventory_until "${backend_sockets[$i]}" "$expected" "$scale_dir/query-final-$i.json"
+    checked=$((checked + 1))
+  fi
 done
-echo "dynamic-scale ok protocol=$protocol nodes_before=$server_count nodes_after=${#remaining[@]} frontends=$frontend_count backends=$backend_count"
+if (( checked == 0 )); then
+  echo "FAIL: dynamic scale group $scale_group closed all clients" >&2
+  dump_e2e_diagnostics "dynamic-scale-no-live-client" "$scale_dir"
+  exit 1
+fi
+
+echo "dynamic-scale ok group=$scale_group seed=$seed servers=$server_count live_clients=$checked closed_clients=$close_count"

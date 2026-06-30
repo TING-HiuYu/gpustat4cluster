@@ -16,7 +16,7 @@ use std::{
 
 use cache::GresCache;
 use chrono::Local;
-#[cfg(feature = "test-collector")]
+#[cfg(feature = "debug")]
 use collector::TestGresCollector;
 use collector::{GresCollector, NvmlCollector};
 use common::{Config, DiscoveryAnnounce, DiscoveryQuery, ErrorCode, PROTOCOL_VERSION};
@@ -175,7 +175,7 @@ fn build_collector(
     hostname: &str,
     config: &Config,
 ) -> Result<(Arc<dyn GresCollector>, bool, &'static str), StartupError> {
-    #[cfg(feature = "test-collector")]
+    #[cfg(feature = "debug")]
     if let Some(inventory_path) = config.runtime.test_inventory_path.as_deref() {
         let collector = TestGresCollector::from_inventory_file_with_reload(
             inventory_path,
@@ -205,11 +205,11 @@ fn build_collector(
         let _ = hostname;
         return Ok((Arc::new(collector) as Arc<dyn GresCollector>, false, "test"));
     }
-    #[cfg(not(feature = "test-collector"))]
+    #[cfg(not(feature = "debug"))]
     if config.runtime.test_inventory_path.is_some() || config.runtime.test_runtime_path.is_some() {
         return Err(StartupError::new(
             ErrorCode::ConfigInvalid,
-            "runtime.test_inventory_path/runtime.test_runtime_path require building the server with --features test-collector".to_string(),
+            "runtime.test_inventory_path/runtime.test_runtime_path require building the server with --features debug".to_string(),
         ));
     }
 

@@ -315,7 +315,7 @@ impl LocalApiState {
         });
     }
 
-    #[cfg(feature = "test-api")]
+    #[cfg(feature = "debug")]
     pub fn shutdown(&self, reason: &str) {
         let connections = self
             .connections
@@ -347,7 +347,7 @@ impl LocalApiState {
         }
     }
 
-    #[cfg(feature = "test-api")]
+    #[cfg(feature = "debug")]
     pub fn disconnect_hostname(&self, hostname: &str, reason: &str) -> usize {
         let addrs = self
             .connections
@@ -529,7 +529,7 @@ pub(crate) fn handle_command(cmd: &str, state: &LocalApiState) -> Result<String,
         return Ok(format!("{}\n", json));
     }
 
-    #[cfg(feature = "test-api")]
+    #[cfg(feature = "debug")]
     if let Some(reason) = cmd.strip_prefix("SHUTDOWN") {
         let reason = reason.trim();
         let reason = if reason.is_empty() {
@@ -541,7 +541,7 @@ pub(crate) fn handle_command(cmd: &str, state: &LocalApiState) -> Result<String,
         return Ok("OK shutdown\n".to_string());
     }
 
-    #[cfg(feature = "test-api")]
+    #[cfg(feature = "debug")]
     if let Some(hostname) = cmd.strip_prefix("DISCONNECT_HOST") {
         let hostname = hostname.trim();
         if hostname.is_empty() {

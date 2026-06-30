@@ -44,7 +44,7 @@ trap cleanup_e2e EXIT
 
 require_binaries() {
   if [[ "${E2E_SKIP_BUILD:-0}" != "1" ]]; then
-    (cd "$ROOT_DIR" && cargo build --locked --release -p server --features test-collector --no-default-features && cargo build --locked --release -p gpustat4cluster-client-backend --features test-api && cargo build --locked --release -p gpustat4cluster-client-cli)
+    (cd "$ROOT_DIR" && cargo build --locked --release -p server --features debug --no-default-features && cargo build --locked --release -p gpustat4cluster-client-backend --features debug && cargo build --locked --release -p gpustat4cluster-client-cli)
   fi
   for bin in "$SERVER_BIN" "$BACKEND_BIN" "$CLIENT_BIN"; do
     [[ -x "$bin" ]] || { echo "required e2e binary is missing or not executable: $bin" >&2; exit 127; }
