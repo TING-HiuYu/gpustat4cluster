@@ -776,13 +776,7 @@ fn refresh_stale_cache_for_query(state: &LocalApiState) -> Result<(), String> {
                     .cache
                     .lock()
                     .map_err(|_| "cache lock poisoned".to_string())?;
-                crate::cache::mark_stale(
-                    &mut rows,
-                    target.connection_id,
-                    target.addr,
-                    target.hostname,
-                    e.to_string(),
-                );
+                rows.remove(&format!("{}-{}", target.addr.ip(), target.addr.port()));
             }
         }
     }
@@ -888,6 +882,7 @@ mod tests {
     struct MockConnection {
         addr: SocketAddr,
         snapshot: ServerGresSnapshot,
+        query_error: Option<String>,
     }
 
     impl ServerConnection for MockConnection {
@@ -908,6 +903,9 @@ mod tests {
         }
 
         fn query(&self, _timeout: Duration) -> Result<ServerGresSnapshot, String> {
+            if let Some(error) = &self.query_error {
+                return Err(error.clone());
+            }
             Ok(self.snapshot.clone())
         }
 
@@ -1004,6 +1002,7 @@ mod tests {
                         })
                         .collect(),
                 },
+                query_error: None,
             }),
         );
 
@@ -1013,5 +1012,49 @@ mod tests {
         assert_eq!(json["nodes"][0]["num"], 4);
         assert_eq!(json["nodes"][0]["gres"].as_array().unwrap().len(), 4);
         assert_eq!(json["nodes"][0]["gres"][3]["mem_total_mb"], 24 * 1024);
+    }
+
+    #[test]
+    fn query_failure_removes_disconnected_cache_entry() {
+        let addr: SocketAddr = "127.0.0.1:39002".parse().unwrap();
+        let snapshot = ServerGresSnapshot {
+            hostname: "dead-node".to_string(),
+            driver_version: None,
+            gres: Vec::new(),
+        };
+        let cache = Arc::new(Mutex::new(CacheMap::new()));
+        {
+            let mut rows = cache.lock().unwrap();
+            rows.insert(
+                "127.0.0.1-39002".to_string(),
+                crate::cache::ConnectionCacheEntry {
+                    connection_id: "conn-001".to_string(),
+                    hostname: "dead-node".to_string(),
+                    num: 0,
+                    server_gres: Vec::new(),
+                    record_timestamp: 0,
+                    addr,
+                    last_snapshot: Some(snapshot.clone()),
+                    last_error: None,
+                    last_query_latency_us: None,
+                },
+            );
+        }
+
+        let state = state(cache.clone());
+        state.connections.lock().unwrap().insert(
+            addr,
+            Arc::new(MockConnection {
+                addr,
+                snapshot,
+                query_error: Some("timeout while waiting for UDP frame".to_string()),
+            }),
+        );
+
+        let response = handle_command("QUERY {}", &state).expect("query response");
+        let json: serde_json::Value = serde_json::from_str(response.trim()).expect("json");
+        assert_eq!(json["meta"]["status"], "empty");
+        assert_eq!(json["nodes"].as_array().unwrap().len(), 0);
+        assert!(cache.lock().unwrap().is_empty());
     }
 }
