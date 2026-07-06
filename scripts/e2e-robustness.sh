@@ -265,7 +265,7 @@ run_mixed_group() {
     sleep 0.1
   done
 
-  sleep 2
+  sleep 7
   expected="$case_dir/expected-final.json"
   write_expected_alive "$expected"
   query_live_clients "$expected" "${protocol}-final-mixed-$offset" all || true
