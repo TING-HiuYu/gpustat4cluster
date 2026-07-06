@@ -334,7 +334,7 @@ PY
 query_inventory_until() {
   local uds="$1" expected_json="$2" out="$3" deadline=$((SECONDS + 20))
   while (( SECONDS < deadline )); do
-    if GPUSTAT4CLUSTER_BACKEND_SOCKET="$uds" "$CLIENT_BIN" --json >"$out" 2>"$out.err"; then
+    if client_query_json "$uds" "$out"; then
       if compare_inventory_json "$out" "$expected_json" >>"$out.err" 2>&1; then
         cat "$out.err" >&2
         return 0
@@ -363,7 +363,7 @@ def max_delay_us(payload):
     return max(delays)
 for i in range(11):
     start = time.perf_counter_ns()
-    cp=subprocess.run([client, '--json'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    cp=subprocess.run([client, '--json'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
     wall_us=(time.perf_counter_ns()-start)//1000
     if cp.returncode:
         sys.stderr.write(cp.stderr.decode(errors='replace')); sys.exit(cp.returncode)
@@ -583,10 +583,15 @@ wait_for_log() {
   return 1
 }
 
+client_query_json() {
+  local uds="$1" out="$2"
+  timeout "${E2E_QUERY_TIMEOUT_SECS:-3}" env GPUSTAT4CLUSTER_BACKEND_SOCKET="$uds" "$CLIENT_BIN" --json >"$out" 2>"$out.err"
+}
+
 query_until() {
   local uds="$1" expected_nodes="$2" expected_gres="$3" out="$4" deadline=$((SECONDS + 20))
   while (( SECONDS < deadline )); do
-    if GPUSTAT4CLUSTER_BACKEND_SOCKET="$uds" "$CLIENT_BIN" --json >"$out" 2>"$out.err"; then
+    if client_query_json "$uds" "$out"; then
       if python3 - "$out" "$expected_nodes" "$expected_gres" <<'PY'
 import json, sys
 path, expected_nodes, expected_gres = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
@@ -613,7 +618,7 @@ PY
 
 probe_frontend() {
   local uds="$1" out="$2"
-  GPUSTAT4CLUSTER_BACKEND_SOCKET="$uds" "$CLIENT_BIN" --json >"$out" 2>"$out.err" || true
+  client_query_json "$uds" "$out" || true
 }
 
 assert_connected_events_at_least() {
@@ -630,7 +635,7 @@ assert_connected_events_at_least() {
 query_expect_any_stale_or_error() {
   local uds="$1" out="$2" deadline=$((SECONDS + 20))
   while (( SECONDS < deadline )); do
-    if GPUSTAT4CLUSTER_BACKEND_SOCKET="$uds" "$CLIENT_BIN" --json >"$out" 2>"$out.err"; then
+    if client_query_json "$uds" "$out"; then
       if python3 - "$out" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
@@ -665,7 +670,7 @@ PY
 query_expect_node_absent() {
   local uds="$1" hostname="$2" out="$3" deadline=$((SECONDS + 20))
   while (( SECONDS < deadline )); do
-    if GPUSTAT4CLUSTER_BACKEND_SOCKET="$uds" "$CLIENT_BIN" --json >"$out" 2>"$out.err"; then
+    if client_query_json "$uds" "$out"; then
       if python3 - "$out" "$hostname" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
@@ -692,7 +697,7 @@ PY
 query_expect_driver() {
   local uds="$1" expected_driver="$2" out="$3" deadline=$((SECONDS + 20))
   while (( SECONDS < deadline )); do
-    if GPUSTAT4CLUSTER_BACKEND_SOCKET="$uds" "$CLIENT_BIN" --json >"$out" 2>"$out.err"; then
+    if client_query_json "$uds" "$out"; then
       if python3 - "$out" "$expected_driver" <<'PY'
 import json, sys
 path, expected = sys.argv[1], sys.argv[2]
