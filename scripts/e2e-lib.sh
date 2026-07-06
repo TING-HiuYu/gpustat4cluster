@@ -653,6 +653,42 @@ PY
   return 1
 }
 
+inventory_hostname() {
+  local inventory="$1"
+  python3 - "$inventory" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    print(json.load(f)["hostname"])
+PY
+}
+
+query_expect_node_absent() {
+  local uds="$1" hostname="$2" out="$3" deadline=$((SECONDS + 20))
+  while (( SECONDS < deadline )); do
+    if GPUSTAT4CLUSTER_BACKEND_SOCKET="$uds" "$CLIENT_BIN" --json >"$out" 2>"$out.err"; then
+      if python3 - "$out" "$hostname" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+hostname = sys.argv[2]
+present = [node.get("hostname") for node in data.get("nodes", [])]
+if hostname not in present:
+    sys.exit(0)
+print(f"node still present: {hostname}; current nodes={present}", file=sys.stderr)
+sys.exit(1)
+PY
+      then
+        return 0
+      fi
+    fi
+    sleep 0.2
+  done
+  echo "query still exposes disconnected node $hostname" >&2
+  [[ -f "$out" ]] && cat "$out" >&2 || true
+  [[ -f "$out.err" ]] && cat "$out.err" >&2 || true
+  return 1
+}
+
 query_expect_driver() {
   local uds="$1" expected_driver="$2" out="$3" deadline=$((SECONDS + 20))
   while (( SECONDS < deadline )); do

@@ -14,7 +14,7 @@ wait_for_socket "$uds"
 query_inventory_until "$uds" "$expected" "$dir/query.json"
 assert_query_latency "$uds" 1000000 300 "$dir/query-latency.json"
 stop_e2e_pid "${server_pid}"
-query_expect_any_stale_or_error "$uds" "$dir/query-after-server-disconnect.json"
+query_expect_node_absent "$uds" "$(inventory_hostname "$inventory")" "$dir/query-after-server-disconnect.json"
 assert_backend_disconnected_seen "$dir/backend.log"
 sleep 0.2
 stop_e2e_pid "${backend_pid}"
