@@ -367,6 +367,8 @@ pub struct GresStaticInfo {
     RkyvDeserialize,
 )]
 pub struct RuntimeSnapshot {
+    #[serde(default)]
+    pub metadata_hash: u64,
     pub gres: Vec<GresRuntimeInfo>,
 }
 
@@ -424,11 +426,43 @@ impl HostMetadata {
                 .collect(),
         }
     }
+
+    pub fn metadata_hash(&self) -> u64 {
+        fn write_bytes(hash: &mut u64, bytes: &[u8]) {
+            for byte in bytes {
+                *hash ^= u64::from(*byte);
+                *hash = hash.wrapping_mul(0x100000001b3);
+            }
+            *hash ^= 0xff;
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+
+        let mut hash = 0xcbf29ce484222325u64;
+        write_bytes(&mut hash, self.hostname.as_bytes());
+        if let Some(driver_version) = &self.driver_version {
+            write_bytes(&mut hash, driver_version.as_bytes());
+        } else {
+            write_bytes(&mut hash, b"");
+        }
+        for gres in &self.gres {
+            write_bytes(&mut hash, &[gres.index]);
+            write_bytes(&mut hash, gres.name.as_bytes());
+            if let Some(uuid) = &gres.uuid {
+                write_bytes(&mut hash, uuid.as_bytes());
+            } else {
+                write_bytes(&mut hash, b"");
+            }
+            write_bytes(&mut hash, &gres.memory_total_mb.to_le_bytes());
+        }
+        hash
+    }
 }
 
 impl RuntimeSnapshot {
     pub fn from_snapshot(snapshot: &ServerGresSnapshot) -> Self {
+        let metadata = HostMetadata::from_snapshot(snapshot);
         Self {
+            metadata_hash: metadata.metadata_hash(),
             gres: snapshot
                 .gres
                 .iter()
@@ -877,6 +911,31 @@ mod tests {
             snapshot.gres[0].processes[0].uid
         );
         assert_eq!(rebuilt.gres[0].processes[0].command, None);
+    }
+
+    #[test]
+    fn metadata_hash_tracks_static_gres_fields_only() {
+        let snapshot = sample_snapshot();
+        let metadata = HostMetadata::from_snapshot(&snapshot);
+        let base_hash = metadata.metadata_hash();
+
+        let mut runtime_only = snapshot.clone();
+        runtime_only.gres[0].memory.used_mb += 1;
+        runtime_only.gres[0].utilization.gres_percent = runtime_only.gres[0]
+            .utilization
+            .gres_percent
+            .saturating_sub(1);
+        assert_eq!(
+            HostMetadata::from_snapshot(&runtime_only).metadata_hash(),
+            base_hash
+        );
+
+        let mut static_change = snapshot;
+        static_change.gres[0].memory.total_mb += 1024;
+        assert_ne!(
+            HostMetadata::from_snapshot(&static_change).metadata_hash(),
+            base_hash
+        );
     }
 
     #[test]

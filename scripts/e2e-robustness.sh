@@ -98,11 +98,17 @@ start_backend_index() {
 
 stop_server_index() {
   local idx="$1" reason="$2"
+  local hostname="${hostnames[$idx]}"
   if [[ -n "${server_handles[$idx]}" ]]; then
     stop_e2e_pid "${server_handles[$idx]}"
   fi
   server_alive[$idx]=0
   echo "server-$idx stopped reason=$reason" >>"$case_dir/events.log"
+  for backend_idx in "${!backend_sockets[@]}"; do
+    if (( backend_alive[$backend_idx] == 1 )) && [[ -S "${backend_sockets[$backend_idx]}" ]]; then
+      request_backend_disconnect_host "${backend_sockets[$backend_idx]}" "$hostname" 2>>"$case_dir/disconnect-host-$idx-client-$backend_idx.err" || true
+    fi
+  done
 }
 
 stop_backend_index() {
@@ -265,7 +271,7 @@ run_mixed_group() {
     sleep 0.1
   done
 
-  sleep 2
+  sleep 7
   expected="$case_dir/expected-final.json"
   write_expected_alive "$expected"
   query_live_clients "$expected" "${protocol}-final-mixed-$offset" all || true
