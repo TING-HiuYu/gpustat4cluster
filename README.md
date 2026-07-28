@@ -2,7 +2,7 @@
 
 [中文](#clustat) | [English](#clustat-english)
 
-clustat 是一个面向 GPU 集群的低延迟 GPU 状态查看工具，with a CLI UI inspired by [gpustat](https://github.com/wookayin/gpustat)。它由计算节点上的 `clustat-server`、登录节点或用户侧的 `clustat-backend`、以及命令行前端 `clustat` 组成。日常使用体验和 `gpustat` 接近，可以理解为集群版 `gpustat`。
+clustat 是一个面向 GPU 集群的低延迟 GPU 状态查看工具，伴有一个启发自 [gpustat](https://github.com/wookayin/gpustat) 的命令行ui。它由计算节点上的 `clustat-server`、登录节点或用户侧的 `clustat-backend`、以及命令行前端 `clustat` 组成。日常使用体验和 `gpustat` 接近，可以理解为集群版 `gpustat`。
 
 主要能力：
 
