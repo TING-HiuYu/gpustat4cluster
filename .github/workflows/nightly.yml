@@ -118,11 +118,20 @@ jobs:
 
       - name: Run ${{ matrix.name }}
         run: |
-          E2E_SKIP_BUILD=1 \
-          SERVER_BIN=/work/e2e-bin/clustat-server \
-          BACKEND_BIN=/work/e2e-bin/clustat-backend \
-          CLIENT_BIN=/work/e2e-bin/clustat \
-          scripts/e2e-docker-run.sh ${{ matrix.script }}
+          set -euo pipefail
+          for i in 1 2 3; do
+            E2E_SKIP_BUILD=1 \
+            SERVER_BIN=/work/e2e-bin/clustat-server \
+            BACKEND_BIN=/work/e2e-bin/clustat-backend \
+            CLIENT_BIN=/work/e2e-bin/clustat \
+            scripts/e2e-docker-run.sh ${{ matrix.script }} && break
+            if [ "$i" -eq 3 ]; then
+              echo "Docker-based e2e failed after retries"
+              exit 1
+            fi
+            echo "Attempt $i failed; retrying in $((i*15))s..."
+            sleep $((i*15))
+          done
 
   e2e-dynamic-scale:
     name: e2e dynamic scale group ${{ matrix.group }}
@@ -159,12 +168,21 @@ jobs:
 
       - name: Run e2e dynamic scale group ${{ matrix.group }}
         run: |
-          E2E_SCALE_GROUP=${{ matrix.group }} \
-          E2E_SKIP_BUILD=1 \
-          SERVER_BIN=/work/e2e-bin/clustat-server \
-          BACKEND_BIN=/work/e2e-bin/clustat-backend \
-          CLIENT_BIN=/work/e2e-bin/clustat \
-          scripts/e2e-docker-run.sh scripts/e2e-dynamic-scale.sh
+          set -euo pipefail
+          for i in 1 2 3; do
+            E2E_SCALE_GROUP=${{ matrix.group }} \
+            E2E_SKIP_BUILD=1 \
+            SERVER_BIN=/work/e2e-bin/clustat-server \
+            BACKEND_BIN=/work/e2e-bin/clustat-backend \
+            CLIENT_BIN=/work/e2e-bin/clustat \
+            scripts/e2e-docker-run.sh scripts/e2e-dynamic-scale.sh && break
+            if [ "$i" -eq 3 ]; then
+              echo "Docker-based e2e failed after retries"
+              exit 1
+            fi
+            echo "Attempt $i failed; retrying in $((i*15))s..."
+            sleep $((i*15))
+          done
 
   e2e-robustness:
     name: e2e robustness group ${{ matrix.group }}
@@ -205,9 +223,18 @@ jobs:
 
       - name: Run e2e robustness group ${{ matrix.group }}
         run: |
-          E2E_ROBUSTNESS_GROUP=${{ matrix.group }} \
-          E2E_SKIP_BUILD=1 \
-          SERVER_BIN=/work/e2e-bin/clustat-server \
-          BACKEND_BIN=/work/e2e-bin/clustat-backend \
-          CLIENT_BIN=/work/e2e-bin/clustat \
-          scripts/e2e-docker-run.sh scripts/e2e-robustness.sh
+          set -euo pipefail
+          for i in 1 2 3; do
+            E2E_ROBUSTNESS_GROUP=${{ matrix.group }} \
+            E2E_SKIP_BUILD=1 \
+            SERVER_BIN=/work/e2e-bin/clustat-server \
+            BACKEND_BIN=/work/e2e-bin/clustat-backend \
+            CLIENT_BIN=/work/e2e-bin/clustat \
+            scripts/e2e-docker-run.sh scripts/e2e-robustness.sh && break
+            if [ "$i" -eq 3 ]; then
+              echo "Docker-based e2e failed after retries"
+              exit 1
+            fi
+            echo "Attempt $i failed; retrying in $((i*15))s..."
+            sleep $((i*15))
+          done

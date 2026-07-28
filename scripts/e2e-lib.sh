@@ -482,6 +482,13 @@ backend_container_name() {
   echo "clustat-$E2E_RUN_ID-backend-$base"
 }
 
+container_hostname() {
+  local name="$1" hash prefix
+  hash="$(printf '%s' "$name" | cksum | awk '{print $1}')"
+  prefix="$(printf '%s' "$name" | tr -c 'A-Za-z0-9-' '-' | cut -c1-48)"
+  printf '%s-%s\n' "$prefix" "$hash"
+}
+
 start_container() {
   local role="$1" name="$2" log="$3"
   shift 3
@@ -497,7 +504,7 @@ start_container() {
   done
   docker run -d \
     --name "$name" \
-    --hostname "$name" \
+    --hostname "$(container_hostname "$name")" \
     --network "$E2E_DOCKER_NETWORK" \
     "${mount_args[@]}" \
     -w "$ROOT_DIR" \
