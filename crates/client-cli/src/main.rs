@@ -10,11 +10,11 @@ mod render;
 
 fn main() {
     if let Err(e) = run() {
-        if e.starts_with("Usage:") || e.starts_with("gpustat4cluster ") {
+        if e.starts_with("Usage:") || e.starts_with("clustat ") {
             println!("{}", e);
             return;
         }
-        eprintln!("[gpustat4cluster][error] {}", e);
+        eprintln!("[clustat][error] {}", e);
         std::process::exit(1);
     }
 }

@@ -1,0 +1,26 @@
+[Unit]
+Description=clustat server daemon
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=6
+
+[Service]
+Type=simple
+User=clustat
+Group=clustat
+Environment=CLUSTAT_CONFIG=/etc/clustat/server.toml
+ExecStart=/usr/local/bin/clustat-server
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+StateDirectory=clustat
+LogsDirectory=clustat
+RuntimeDirectory=clustat
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

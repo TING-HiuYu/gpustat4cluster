@@ -155,10 +155,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          GPUSTAT4CLUSTER_DEB_MULTIARCH=1 scripts/package-deb.sh
+          CLUSTAT_DEB_MULTIARCH=1 scripts/package-deb.sh
           mkdir -p release-assets
-          cp dist/gpustat4cluster-server_*_all.deb release-assets/gpustat4cluster-server-multiarch.deb
-          cp dist/gpustat4cluster-client_*_all.deb release-assets/gpustat4cluster-client-multiarch.deb
+          cp dist/clustat-server_*_all.deb release-assets/clustat-server-multiarch.deb
+          cp dist/clustat-client_*_all.deb release-assets/clustat-client-multiarch.deb
 
           make_anylinux_bundle() {
             local arch="$1"
@@ -167,31 +167,31 @@ jobs:
             local backend_bin="$4"
             local tmpdir
             tmpdir="$(mktemp -d)"
-            mkdir -p "$tmpdir/bin" "$tmpdir/etc/gpustat4cluster"
-            cp "$server_bin" "$tmpdir/bin/gpustat4cluster-server"
-            cp "$client_bin" "$tmpdir/bin/gpustat4cluster-client"
-            cp "$backend_bin" "$tmpdir/bin/gpustat4cluster-client-backend"
-            cp dist/etc/gpustat4cluster/server.toml.example "$tmpdir/etc/gpustat4cluster/server.toml.example"
-            cp dist/etc/gpustat4cluster/client.toml.example "$tmpdir/etc/gpustat4cluster/client.toml.example"
-            (cd "$tmpdir" && zip -qr "${GITHUB_WORKSPACE}/release-assets/gpustat4cluster-server&client-anylinux-${arch}.zip" .)
+            mkdir -p "$tmpdir/bin" "$tmpdir/etc/clustat"
+            cp "$server_bin" "$tmpdir/bin/clustat-server"
+            cp "$client_bin" "$tmpdir/bin/clustat"
+            cp "$backend_bin" "$tmpdir/bin/clustat-backend"
+            cp dist/etc/clustat/server.toml.example "$tmpdir/etc/clustat/server.toml.example"
+            cp dist/etc/clustat/client.toml.example "$tmpdir/etc/clustat/client.toml.example"
+            (cd "$tmpdir" && zip -qr "${GITHUB_WORKSPACE}/release-assets/clustat-server&client-anylinux-${arch}.zip" .)
             rm -rf "$tmpdir"
           }
 
           make_anylinux_bundle \
             x86_64 \
-            target/release/server \
-            target/release/gpustat4cluster \
-            target/release/gpustat4cluster-client-backend
+            target/release/clustat-server \
+            target/release/clustat \
+            target/release/clustat-backend
           make_anylinux_bundle \
             aarch64 \
-            target/aarch64-unknown-linux-gnu/release/server \
-            target/aarch64-unknown-linux-gnu/release/gpustat4cluster \
-            target/aarch64-unknown-linux-gnu/release/gpustat4cluster-client-backend
+            target/aarch64-unknown-linux-gnu/release/clustat-server \
+            target/aarch64-unknown-linux-gnu/release/clustat \
+            target/aarch64-unknown-linux-gnu/release/clustat-backend
 
       - name: Upload Ubuntu/Debian and anylinux artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: gpustat4cluster-ubuntu-deb-anylinux
+          name: clustat-ubuntu-deb-anylinux
           path: release-assets/*
 
   redhat-rpm:
@@ -217,15 +217,15 @@ jobs:
       - name: Build rpm packages
         run: |
           set -euo pipefail
-          GPUSTAT4CLUSTER_RPM_MULTIARCH=1 scripts/package-rpm.sh
+          CLUSTAT_RPM_MULTIARCH=1 scripts/package-rpm.sh
           mkdir -p release-assets
-          cp dist/gpustat4cluster-server-*.noarch.rpm release-assets/gpustat4cluster-server-multiarch.rpm
-          cp dist/gpustat4cluster-client-*.noarch.rpm release-assets/gpustat4cluster-client-multiarch.rpm
+          cp dist/clustat-server-*.noarch.rpm release-assets/clustat-server-multiarch.rpm
+          cp dist/clustat-client-*.noarch.rpm release-assets/clustat-client-multiarch.rpm
 
       - name: Upload RedHat/CentOS artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: gpustat4cluster-redhat-rpm
+          name: clustat-redhat-rpm
           path: release-assets/*
 
   archlinux-client:
@@ -251,12 +251,12 @@ jobs:
           set -euo pipefail
           scripts/package-archlinux-client.sh
           mkdir -p release-assets
-          cp dist/*.pkg.tar.zst release-assets/gpustat4cluster-client-archlinux-multiarch.pkg.tar.zst
+          cp dist/*.pkg.tar.zst release-assets/clustat-client-archlinux-multiarch.pkg.tar.zst
 
       - name: Upload Arch Linux artifact
         uses: actions/upload-artifact@v7
         with:
-          name: gpustat4cluster-archlinux-client
+          name: clustat-archlinux-client
           path: release-assets/*
 
   macos-client:
@@ -278,31 +278,31 @@ jobs:
         run: |
           set -euxo pipefail
           for target in x86_64-apple-darwin aarch64-apple-darwin; do
-            cargo build --locked --release --target "$target" -p gpustat4cluster-client-backend
-            cargo build --locked --release --target "$target" -p gpustat4cluster-client-cli
+            cargo build --locked --release --target "$target" -p clustat-client-backend
+            cargo build --locked --release --target "$target" -p clustat-client-cli
           done
 
       - name: Create universal client package
         run: |
           set -euxo pipefail
           pkgdir="package-root"
-          mkdir -p "release-assets" "$pkgdir/bin" "$pkgdir/etc/gpustat4cluster"
+          mkdir -p "release-assets" "$pkgdir/bin" "$pkgdir/etc/clustat"
           lipo -create \
-            target/x86_64-apple-darwin/release/gpustat4cluster \
-            target/aarch64-apple-darwin/release/gpustat4cluster \
-            -output "$pkgdir/bin/gpustat4cluster-client"
+            target/x86_64-apple-darwin/release/clustat \
+            target/aarch64-apple-darwin/release/clustat \
+            -output "$pkgdir/bin/clustat"
           lipo -create \
-            target/x86_64-apple-darwin/release/gpustat4cluster-client-backend \
-            target/aarch64-apple-darwin/release/gpustat4cluster-client-backend \
-            -output "$pkgdir/bin/gpustat4cluster-client-backend"
-          cp dist/etc/gpustat4cluster/client.toml.example "$pkgdir/etc/gpustat4cluster/client.toml.example"
-          cp dist/etc/gpustat4cluster/client.toml.example "$pkgdir/etc/gpustat4cluster/client.toml"
-          tar -C "$pkgdir" -czf "release-assets/gpustat4cluster-client-macos-multiarch.tar.gz" .
+            target/x86_64-apple-darwin/release/clustat-backend \
+            target/aarch64-apple-darwin/release/clustat-backend \
+            -output "$pkgdir/bin/clustat-backend"
+          cp dist/etc/clustat/client.toml.example "$pkgdir/etc/clustat/client.toml.example"
+          cp dist/etc/clustat/client.toml.example "$pkgdir/etc/clustat/client.toml"
+          tar -C "$pkgdir" -czf "release-assets/clustat-client-macos-multiarch.tar.gz" .
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v7
         with:
-          name: gpustat4cluster-macos-client
+          name: clustat-macos-client
           path: release-assets/*
 
   windows-client:
@@ -336,24 +336,24 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          cargo build --locked --release --target x86_64-pc-windows-gnullvm -p gpustat4cluster-client-cli
-          cargo build --locked --release --target aarch64-pc-windows-gnullvm -p gpustat4cluster-client-cli
+          cargo build --locked --release --target x86_64-pc-windows-gnullvm -p clustat-client-cli
+          cargo build --locked --release --target aarch64-pc-windows-gnullvm -p clustat-client-cli
 
       - name: Package Windows client
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force release-assets, package-root\bin, package-root\etc\gpustat4cluster | Out-Null
-          Copy-Item target\x86_64-pc-windows-gnullvm\release\gpustat4cluster.exe package-root\bin\gpustat4cluster-client-x86_64.exe
-          Copy-Item target\aarch64-pc-windows-gnullvm\release\gpustat4cluster.exe package-root\bin\gpustat4cluster-client-aarch64.exe
-          Copy-Item dist\etc\gpustat4cluster\client.toml.example package-root\etc\gpustat4cluster\client.toml.example
-          Copy-Item dist\etc\gpustat4cluster\client.toml.example package-root\etc\gpustat4cluster\client.toml
-          Compress-Archive -Path package-root\* -DestinationPath "release-assets\gpustat4cluster-client-windows-multiarch.zip" -Force
+          New-Item -ItemType Directory -Force release-assets, package-root\bin, package-root\etc\clustat | Out-Null
+          Copy-Item target\x86_64-pc-windows-gnullvm\release\clustat.exe package-root\bin\clustat-client-x86_64.exe
+          Copy-Item target\aarch64-pc-windows-gnullvm\release\clustat.exe package-root\bin\clustat-client-aarch64.exe
+          Copy-Item dist\etc\clustat\client.toml.example package-root\etc\clustat\client.toml.example
+          Copy-Item dist\etc\clustat\client.toml.example package-root\etc\clustat\client.toml
+          Compress-Archive -Path package-root\* -DestinationPath "release-assets\clustat-client-windows-multiarch.zip" -Force
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
         with:
-          name: gpustat4cluster-windows-client
+          name: clustat-windows-client
           path: release-assets/*
 
   test:
@@ -379,9 +379,9 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --workspace
-          cargo test -p server
-          cargo test -p gpustat4cluster-client-backend
-          cargo check -p server --features nvml
+          cargo test -p clustat-server
+          cargo test -p clustat-client-backend
+          cargo check -p clustat-server --features nvml
 
       - name: Download built artifacts
         uses: actions/download-artifact@v8
@@ -393,15 +393,15 @@ jobs:
         run: |
           set -euo pipefail
           expected=(
-            "gpustat4cluster-server-multiarch.deb"
-            "gpustat4cluster-client-multiarch.deb"
-            "gpustat4cluster-server-multiarch.rpm"
-            "gpustat4cluster-client-multiarch.rpm"
-            "gpustat4cluster-client-archlinux-multiarch.pkg.tar.zst"
-            "gpustat4cluster-client-macos-multiarch.tar.gz"
-            "gpustat4cluster-client-windows-multiarch.zip"
-            "gpustat4cluster-server&client-anylinux-x86_64.zip"
-            "gpustat4cluster-server&client-anylinux-aarch64.zip"
+            "clustat-server-multiarch.deb"
+            "clustat-client-multiarch.deb"
+            "clustat-server-multiarch.rpm"
+            "clustat-client-multiarch.rpm"
+            "clustat-client-archlinux-multiarch.pkg.tar.zst"
+            "clustat-client-macos-multiarch.tar.gz"
+            "clustat-client-windows-multiarch.zip"
+            "clustat-server&client-anylinux-x86_64.zip"
+            "clustat-server&client-anylinux-aarch64.zip"
           )
           for file in "${expected[@]}"; do
             test -s "release-assets/$file"
@@ -439,10 +439,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [[ "$TAG_EXISTS" != "true" ]]; then
-            git tag -a "$TAG" "$TARGET_SHA" -m "gpustat4cluster $TAG"
+            git tag -a "$TAG" "$TARGET_SHA" -m "clustat $TAG"
             git push origin "refs/tags/$TAG"
           fi
-          args=(release create "$TAG" release-assets/* --target "$TARGET_SHA" --title "gpustat4cluster $TAG" --notes-file release_note.md)
+          args=(release create "$TAG" release-assets/* --target "$TARGET_SHA" --title "clustat $TAG" --notes-file release_note.md)
           if [[ "$PRERELEASE" == "true" ]]; then
             args+=(--prerelease)
           fi

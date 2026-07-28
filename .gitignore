@@ -27,4 +27,4 @@ dist/*.tar.gz
 dist/*.zip
 dist/*.pkg.tar.zst
 dist/usr/
-dist/etc/gpustat4cluster/gpustat4cluster.env.example
+dist/etc/clustat/clustat.env.example

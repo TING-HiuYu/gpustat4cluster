@@ -1,8 +1,8 @@
-# gpustat4cluster 开发文档
+# clustat 开发文档
 
-[中文](#gpustat4cluster-开发文档) | [English](#gpustat4cluster-developer-guide)
+[中文](#clustat-开发文档) | [English](#clustat-developer-guide)
 
-本文面向后续维护者，说明当前 crate 划分、collector 抽象、网络协议、缓存路径和性能设计。
+本文面向后续维护者，说明当前 crate 划分、collector 抽象、网络协议、缓存路径、性能设计、debug feature 和 CI 测试体系。
 
 ## Workspace
 
@@ -10,21 +10,29 @@
 crates/common          公共配置、错误码、协议结构、rkyv payload、UDP chunk 编解码
 crates/server          计算节点服务端，负责 GRES/NVML 采集、缓存、UDP/TCP 服务和组播 announce
 crates/client-backend  登录节点/用户侧常驻后端，负责发现服务端、维护连接、缓存查询结果、提供 UDS API
-crates/client-cli      用户命令行前端，负责参数解析、UDS 查询和 gpustat 风格渲染
+crates/client-cli      用户命令行前端，负责参数解析、UDS 查询和 gpustat-inspired CLI UI 渲染
+```
+
+生产二进制：
+
+```text
+clustat-server   运行在 GPU/GRES 节点
+clustat-backend  运行在登录节点或用户侧节点
+clustat          用户执行的 CLI；如果系统没有 gpustat，安装包会创建 gpustat -> clustat
 ```
 
 ## 运行时数据流
 
-1. server 读取 `/etc/gpustat4cluster/server.toml`。
+1. `clustat-server` 读取 `/etc/clustat/server.toml`。
 2. server 初始化 `GresCollector` 实现，目前生产实现是 `NvmlCollector`。
 3. server 后台按 `services.collector_interval_ms` 刷新 collector cache。
 4. server 同时监听 UDP 和 TCP，端口可由 `port_range` 自动选择。
 5. server 在 `multicast_addr` 上发送 announce，announce 包含 hostname、UDP 端口、TCP 端口、协议版本。
-6. client-backend 读取 `/etc/gpustat4cluster/client.toml`，通过组播发现服务端，也监听后续 announce。
-7. client-backend 根据 `[connecting].protocol` 选择 UDP 或 TCP，并为每个 server 维护一条持久连接抽象。
-8. CLI 通过 UDS 发送 `QUERY` 给 client-backend。
-9. client-backend 检查本地 cache：未命中或 TTL 过期时才向对应 server 查询 runtime payload。
-10. client-backend 将网络 payload 投影成前端 JSON view，CLI 渲染为 gpustat 风格表格。
+6. `clustat-backend` 读取 `/etc/clustat/client.toml`，通过组播发现服务端，也监听后续 announce。
+7. backend 根据 `[connecting].protocol` 选择 UDP 或 TCP，并为每个 server 维护一条持久连接抽象。
+8. CLI 通过 UDS 发送 `QUERY` 给 backend。
+9. backend 检查本地 cache：未命中或 TTL 过期时才向对应 server 查询 runtime payload。
+10. backend 将网络 payload 投影成前端 JSON view，CLI 渲染为 gpustat-inspired 表格。
 
 ## Collector 抽象
 
@@ -48,27 +56,11 @@ pub trait GresCollector: Send + Sync {
 - `GresResource`: 单个 GRES 资源，目前 `GresResourceKind::Nvml` 是唯一生产实现。
 - `GresProcess`: 资源关联进程，传输 `uid: u32`、`pid: u32`、显存占用。
 - `NvmlCollector`: 生产 collector，通过 NVML 读取 GPU 数据。
-- `TestGresCollector`: 仅在 `#[cfg(test)]` 下编译，用于单元测试。它不再作为 feature 或环境变量暴露到运行期。
-
-### 为什么网络输出是 `ServerGresSnapshot`
-
-内部 collector 边界是 `GresNodeSnapshot`，网络稳定结构是 `ServerGresSnapshot`。当前生产 GRES 实现是 NVML，因此 CLI 继续渲染为 gpustat 风格表格，但协议字段和缓存字段已经统一使用 `gres`。
-
-这个设计有两个目的：
-
-- 不破坏现有前端协议和 gpustat 风格渲染。
-- 把可扩展点放在 collector 层，后续新增其他 GRES 实现时，从 `GresResourceKind` 增加实现类型并补对应 collector 即可。
-
-后续如果要支持其他 GRES 实现（例如 AMD、Intel 或其他加速设备 collector），推荐路径是：
-
-1. 在 `GresResourceKind` 中新增实现类型。
-2. 新增对应 collector 实现。
-3. 如果新实现需要额外字段，再扩展 `GresResource`、`HostMetadata`、`RuntimeSnapshot` 和 CLI view。
-4. 保留当前 gpustat 兼容渲染路径，作为 NVML 实现的默认视图。
+- `TestGresCollector`: debug/test collector，只在 debug feature 或测试构建中使用，用于进程内测试和 Docker e2e。
 
 ### GRES collector contract
 
-新增 collector 时，需要在对应测试中复用 `assert_gres_collector_contract(&collector)`。这个 contract 会检查：
+新增 collector 时，需要复用 `assert_gres_collector_contract(&collector)`。contract 会检查：
 
 - hostname 非空，driver version 为空时必须用 `None` 而不是空字符串。
 - resource index 必须从 0 开始连续递增。
@@ -79,6 +71,18 @@ pub trait GresCollector: Send + Sync {
 - process pid 不能为 0，process used memory 不能超过该 resource total memory。
 - collector 输出可以拆成 `HostMetadata` + `RuntimeSnapshot`，再无损重建为 `ServerGresSnapshot`。
 - collector 输出可以通过 rkyv payload 编码和解码 roundtrip。
+
+### 扩展其他 GRES 类型
+
+一个服务端进程只负责一种 GRES 实现。客户端可以同时接收多个服务端，每个服务端可以是不同实现；上层只看规范化后的 GRES 清单和 runtime payload。
+
+后续如果要支持 AMD、Intel 或其他加速设备 collector，推荐路径是：
+
+1. 在 `GresResourceKind` 中新增实现类型。
+2. 新增对应 collector 实现。
+3. 补对应 collector contract 测试。
+4. 如果新实现需要额外字段，再扩展 `GresResource`、`HostMetadata`、`RuntimeSnapshot` 和 CLI view。
+5. 保留当前 gpustat-inspired 渲染路径，作为 NVML 实现的默认视图。
 
 ## 网络协议
 
@@ -96,7 +100,7 @@ request_id  8 bytes  big-endian u64
 payload_len 4 bytes  big-endian u32
 ```
 
-运行期使用的主要 frame：
+主要 frame：
 
 - `HandshakeRequest`: client 请求 metadata。
 - `MetadataPayload`: server 返回 `HostMetadata`，包含 hostname、driver_version、GRES 静态信息。
@@ -128,10 +132,10 @@ next_checksum  4 bytes
 
 设计点：
 
-- 单节点 8 卡 payload 通常可以单包承载，但代码仍保留 chunk 机制，避免未来字段增加、进程数增多或 MTU 降低时失败。
+- 单节点 8 卡 payload 通常可以单包承载，但代码保留 chunk 机制，避免未来字段增加、进程数增多或 MTU 降低时失败。
 - 每个 chunk 携带相邻 chunk 校验码；重组时能快速发现丢包、错包和乱序损坏。
 - `udp_mtu = 0` 时按路由探测 MTU，失败 fallback 到 1200。
-- 查询路径支持空 `QueryRequest` datagram，减少一次 JSON payload 构造。
+- 查询路径支持空 `QueryRequest` datagram，减少一次 payload 构造。
 
 ## TCP transport
 
@@ -141,7 +145,7 @@ TCP 与 UDP 使用相同的 frame/payload：
 
 - 握手返回 `MetadataPayload`。
 - 查询返回 `RuntimePayload`。
-- 同一 client-backend 和同一 server 之间保留一条持久 TCP 连接，不再每次前端 QUERY 重新建连。
+- 同一 backend 和同一 server 之间保留一条持久 TCP 连接，不再每次前端 QUERY 重新建连。
 
 ## Cache 和刷新机制
 
@@ -152,7 +156,7 @@ server 侧 `GresCache`：
 - 并发 stale 请求 coalesce，避免多个请求同时打到 NVML。
 - server 输出的 process command 会在传输前清空，减少 payload 并避免把命令行传到客户端。
 
-client-backend 侧 cache：
+backend 侧 cache：
 
 - 使用本地时间作为 `record_timestamp`，避免跨节点时钟漂移影响 TTL。
 - 前端每次 `QUERY` 时检查 TTL，只有记录缺失或超过 `cache_ttl_ms` 才请求 server。
@@ -162,10 +166,20 @@ client-backend 侧 cache：
 
 - 静态信息和运行时信息拆分：握手阶段缓存 hostname、driver、GRES name、UUID、total memory；查询阶段只发送温度、利用率、used memory、进程 UID/PID/显存。
 - UID 在客户端解析成 username，避免服务端传字符串并降低 payload 体积。
-- `command` 不进入 runtime payload，进一步减少网络数据。
+- `command` 不进入 runtime payload，减少网络数据和敏感信息暴露。
 - UDP 单包快路径避免通用分片重组开销。
 - TCP/UDP 都维持持久连接抽象，避免前端频繁 QUERY 时重复握手。
 - CLI 到 backend 使用 UDS，避免本机 HTTP/TCP 的额外开销。
+
+## Debug feature 和测试工具
+
+`debug` feature 用于测试环境，不进入标准发布路径。它提供：
+
+- `TestGresCollector`: 从 JSON inventory 和 mmap/runtime 文件生成虚拟 GRES 数据。
+- 测试 API：e2e 脚本可以注入 runtime 变化、server/client 断开、网络异常等事件。
+- Docker e2e 辅助能力：每个测试容器读取自己的配置和 inventory，输出最终视图供脚本断言。
+
+标准生产构建不依赖这些测试 API。
 
 ## 构建与测试
 
@@ -173,24 +187,65 @@ client-backend 侧 cache：
 source /opt/shell_related/z00_lmod.sh && module load compiler/rust
 cargo fmt --all
 cargo test --workspace
-cargo check -p server --features nvml
+cargo check -p clustat-server --features nvml
 ```
 
-生产 server 构建通常启用真实 NVML：
+生产 server 构建启用真实 NVML：
 
 ```bash
-cargo build --locked --release -p server --features nvml
-cargo build --locked --release -p gpustat4cluster-client-backend
-cargo build --locked --release -p gpustat4cluster-client-cli
+cargo build --locked --release -p clustat-server --features nvml
+cargo build --locked --release -p clustat-client-backend
+cargo build --locked --release -p clustat-client-cli
 ```
+
+debug/e2e 二进制构建：
+
+```bash
+cargo build --locked --release -p clustat-server --features debug --no-default-features
+cargo build --locked --release -p clustat-client-backend --features debug
+cargo build --locked --release -p clustat-client-cli
+```
+
+基础 e2e 脚本覆盖启动顺序、发现方式和传输协议：
+
+```bash
+scripts/e2e-server-first-static.sh
+scripts/e2e-server-first-dynamic.sh
+scripts/e2e-client-first-static.sh
+scripts/e2e-client-first-dynamic.sh
+scripts/e2e-server-first-static-udp.sh
+scripts/e2e-server-first-dynamic-udp.sh
+scripts/e2e-client-first-static-udp.sh
+scripts/e2e-client-first-dynamic-udp.sh
+```
+
+大规模和鲁棒性测试：
+
+```bash
+scripts/e2e-dynamic-scale.sh
+E2E_ROBUSTNESS_GROUP=0 scripts/e2e-robustness.sh
+```
+
+断言原则：
+
+- 不只比较节点数量和 GRES 数量；需要比较期望节点清单和每个节点的 GRES 清单。
+- 基础测试要求首次 `clustat` 查询到渲染低于 1s，连续查询平均 delay 不高于 300us。
+- 大规模测试随机穿插 server/client 启动和正常断开，最后比较状态机生成的 expected 和实际 backend/server view。
+- robustness 测试注入 runtime 异常、server 异常断开、client 异常断开、TCP/UDP 差异事件，最后输出模板化 PASS/FAIL 结果。
+
+## CI workflow
+
+- `Build`: 手动 dispatch，选择 target commit，只构建所有平台产物，不发布。artifact 名称和 Release attachment 名称一致，方便手动下载验证。
+- `Release`: 手动 dispatch，选择 target commit 和 release/prerelease 类型。workflow 验证 target、`release_note.md`、格式、lint/check/test；全部构建和测试通过后读取 Cargo 版本，创建 `v<version>` tag 和 release，并上传 attachment。
+- `Nightly test`: push 或手动 dispatch。流程顺序是 Cargo 基础测试和生产构建、基础 e2e、大规模 e2e、robustness e2e。前一阶段失败时不会启动后一阶段，避免浪费 runner。
 
 ---
 
-# gpustat4cluster Developer Guide
+# clustat Developer Guide
 
-[中文](#gpustat4cluster-开发文档) | [English](#gpustat4cluster-developer-guide)
+[中文](#clustat-开发文档) | [English](#clustat-developer-guide)
 
-This guide documents the current crate layout, collector abstraction, network protocol, cache flow, and performance design.
+This guide documents the current crate layout, collector abstraction, network protocol, cache flow, performance design, debug feature, and CI test system.
 
 ## Workspace
 
@@ -198,16 +253,35 @@ This guide documents the current crate layout, collector abstraction, network pr
 crates/common          shared config, error codes, protocol structs, rkyv payloads, UDP chunk codec
 crates/server          compute-node daemon: GRES/NVML collection, cache, UDP/TCP services, multicast announce
 crates/client-backend  login/user-node daemon: discovery, persistent connections, cache, UDS API
-crates/client-cli      command-line frontend: args, UDS query, gpustat-style rendering
+crates/client-cli      command-line frontend: args, UDS query, gpustat-inspired CLI UI rendering
 ```
+
+Production binaries:
+
+```text
+clustat-server   runs on GPU/GRES nodes
+clustat-backend  runs on login/user nodes
+clustat          user-facing CLI; packages may create gpustat -> clustat when gpustat is absent
+```
+
+## Runtime Flow
+
+1. `clustat-server` reads `/etc/clustat/server.toml`.
+2. The server initializes a `GresCollector`; production currently uses `NvmlCollector`.
+3. The server refreshes collector cache at `services.collector_interval_ms`.
+4. The server listens on UDP and TCP; ports can be selected from `port_range`.
+5. The server sends multicast announce messages with hostname, UDP port, TCP port, and protocol version.
+6. `clustat-backend` reads `/etc/clustat/client.toml`, discovers servers by multicast, and listens for later announce messages.
+7. The backend chooses UDP or TCP from `[connecting].protocol` and keeps one persistent transport per server.
+8. The CLI sends `QUERY` to the backend over UDS.
+9. The backend refreshes from a server only when the local record is missing or older than `cache_ttl_ms`.
+10. The backend projects network payloads into the frontend JSON view; the CLI renders a gpustat-inspired table.
 
 ## Collector Boundary
 
-The server collector boundary is `GresCollector`. Production currently uses `NvmlCollector`; unit tests use `TestGresCollector`, which is compiled only under `#[cfg(test)]` and is not exposed through runtime features or environment variables.
+The server collector boundary is `GresCollector`. Production currently uses `NvmlCollector`; debug/e2e tests use `TestGresCollector`.
 
-The internal normalized model is `GresNodeSnapshot`. The stable network model is `ServerGresSnapshot`: metadata and runtime payloads use `gres` fields, while the current production implementation is NVML and the CLI renders it in a gpustat-compatible table. This keeps the user-facing experience stable while moving the extensibility point to the collector and protocol layers.
-
-When other GRES implementations are added, add a `GresResourceKind` variant, add the collector implementation, then extend `GresResource`, `HostMetadata`, `RuntimeSnapshot`, and the CLI/frontend view only if the normalized fields are not enough. The existing gpustat-compatible rendering path should remain the default view for the NVML implementation.
+The internal normalized model is `GresNodeSnapshot`. The stable network model is `ServerGresSnapshot`: metadata and runtime payloads use `gres` fields, while the current production implementation is NVML and the CLI renders it in a gpustat-inspired table. This keeps the user-facing experience stable while moving the extensibility point to the collector and protocol layers.
 
 ### GRES Collector Contract
 
@@ -225,7 +299,7 @@ New collectors should add a unit test that calls `assert_gres_collector_contract
 
 ## Transport
 
-TCP and UDP now share the same payload types:
+TCP and UDP share the same payload types:
 
 - Handshake: `HandshakeRequest` -> `MetadataPayload(HostMetadata)`.
 - Query: `QueryRequest` -> `RuntimePayload(RuntimeSnapshot)`.
@@ -237,15 +311,37 @@ TCP writes complete binary frames directly to the stream. UDP wraps the same fra
 ## Cache Flow
 
 - Server refreshes collector cache at `services.collector_interval_ms`.
-- Client-backend refreshes from server only when frontend `QUERY` sees a missing or expired local record.
-- Client freshness uses local client-backend time, not server time.
-- Query latency is measured on the client-backend around the transport query and displayed by the CLI when enabled.
+- Backend refreshes from server only when frontend `QUERY` sees a missing or expired local record.
+- Client freshness uses local backend time, not server time.
+- Query latency is measured on the backend around the transport query and displayed by the CLI when enabled.
 
-## Build
+## Performance Design
+
+- Metadata and runtime data are split so runtime queries avoid resending hostnames, GRES names, UUIDs, and total memory.
+- UID is sent as `u32` and resolved to username on the client side.
+- Process command is omitted from runtime payloads.
+- UDP has a single-packet fast path and keeps chunking for future payload growth or lower MTU paths.
+- TCP and UDP both use persistent connection abstractions.
+- CLI-to-backend IPC uses UDS.
+
+## Debug Feature And E2E
+
+The `debug` feature is test-only infrastructure. It exposes `TestGresCollector`, test inventory/runtime files, and test APIs used by Docker e2e scripts. Production builds do not enable it.
+
+Useful commands:
 
 ```bash
-source /opt/shell_related/z00_lmod.sh && module load compiler/rust
-cargo fmt --all
 cargo test --workspace
-cargo check -p server --features nvml
+cargo test -p clustat-server --features debug --no-default-features
+cargo build --locked --release -p clustat-server --features debug --no-default-features
+cargo build --locked --release -p clustat-client-backend --features debug
+cargo build --locked --release -p clustat-client-cli
 ```
+
+E2E scripts cover server-first/client-first, static/dynamic discovery, TCP/UDP, scale, and robustness cases. The tests compare expected node and GRES inventories against actual views, not just aggregate counts.
+
+## CI Workflows
+
+- `Build`: manual workflow for package build artifacts only.
+- `Release`: manual workflow that validates the target commit, requires `release_note.md`, runs checks/tests/builds, creates `v<version>`, and uploads release assets.
+- `Nightly test`: staged test workflow. It runs Cargo tests and production builds first, then basic e2e, then scale e2e, then robustness e2e.

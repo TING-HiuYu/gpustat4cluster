@@ -24,9 +24,9 @@ use serde_json::json;
 use serde_json::Value;
 use socket2::{Domain, Protocol, Socket, Type};
 
-const DEFAULT_CONFIG_PATH: &str = "/etc/gpustat4cluster/server.toml";
-const CONFIG_PATH_ENV: &str = "GPUSTAT4CLUSTER_CONFIG";
-const QUERY_LISTEN_ENV: &str = "GPUSTAT4CLUSTER_QUERY_ADDR";
+const DEFAULT_CONFIG_PATH: &str = "/etc/clustat/server.toml";
+const CONFIG_PATH_ENV: &str = "CLUSTAT_CONFIG";
+const QUERY_LISTEN_ENV: &str = "CLUSTAT_QUERY_ADDR";
 const DEFAULT_QUERY_ADDR: &str = "127.0.0.1:4522";
 
 #[derive(Debug)]
@@ -242,15 +242,15 @@ fn nvml_startup_error_message(nvml_lib_path: Option<&str>) -> String {
 fn nvml_startup_hint(nvml_lib_path: Option<&str>) -> String {
     match nvml_lib_path.map(str::trim).filter(|path| !path.is_empty()) {
         Some(_) => concat!(
-            "Verify the configured NVML library path exists, is readable by the gpustat4cluster service user, ",
+            "Verify the configured NVML library path exists, is readable by the clustat service user, ",
             "and is a real NVIDIA runtime library, not the CUDA stubs library."
         )
         .to_string(),
         None => concat!(
             "This host may only provide a versioned NVML library such as ",
             "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1. Set [runtime].nvml_lib_path in ",
-            "/etc/gpustat4cluster/server.toml, then run: systemctl reset-failed gpustat4cluster-server && ",
-            "systemctl restart gpustat4cluster-server. Do not use CUDA stubs/libnvidia-ml.so."
+            "/etc/clustat/server.toml, then run: systemctl reset-failed clustat-server && ",
+            "systemctl restart clustat-server. Do not use CUDA stubs/libnvidia-ml.so."
         )
         .to_string(),
     }
@@ -1031,7 +1031,7 @@ mod tests {
     fn load_config_rejects_invalid_config_with_config_invalid() {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "gpustat4cluster-invalid-config-{}-{}.toml",
+            "clustat-invalid-config-{}-{}.toml",
             std::process::id(),
             now_unix_ms()
         ));
@@ -1140,14 +1140,14 @@ cache_ttl_ms = 0
         let _guard = crate::collector::ENV_TEST_LOCK
             .lock()
             .expect("env test lock");
-        std::env::set_var("GPUSTAT4CLUSTER_SIMULATE_NVML_MISSING", "1");
+        std::env::set_var("CLUSTAT_SIMULATE_NVML_MISSING", "1");
 
         let err = match build_collector("test-host", &valid_config()) {
             Ok(_) => panic!("expected nvml unavailable"),
             Err(err) => err,
         };
 
-        std::env::remove_var("GPUSTAT4CLUSTER_SIMULATE_NVML_MISSING");
+        std::env::remove_var("CLUSTAT_SIMULATE_NVML_MISSING");
         assert_eq!(err.code, ErrorCode::NvmlUnavailable);
         assert!(err.message.contains("nvml_lib_path"));
     }

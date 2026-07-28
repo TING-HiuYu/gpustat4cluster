@@ -2,12 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${GPUSTAT4CLUSTER_RPM_OUT_DIR:-$ROOT_DIR/dist}"
-VERSION="${GPUSTAT4CLUSTER_RPM_VERSION:-}"
-REVISION="${GPUSTAT4CLUSTER_RPM_REVISION:-1}"
-SKIP_BUILD="${GPUSTAT4CLUSTER_RPM_SKIP_BUILD:-0}"
-MULTIARCH="${GPUSTAT4CLUSTER_RPM_MULTIARCH:-1}"
-ARM64_TARGET="${GPUSTAT4CLUSTER_ARM64_TARGET:-aarch64-unknown-linux-gnu}"
+OUT_DIR="${CLUSTAT_RPM_OUT_DIR:-$ROOT_DIR/dist}"
+VERSION="${CLUSTAT_RPM_VERSION:-}"
+REVISION="${CLUSTAT_RPM_REVISION:-1}"
+SKIP_BUILD="${CLUSTAT_RPM_SKIP_BUILD:-0}"
+MULTIARCH="${CLUSTAT_RPM_MULTIARCH:-1}"
+ARM64_TARGET="${CLUSTAT_ARM64_TARGET:-aarch64-unknown-linux-gnu}"
 TMP_DIR=""
 ARCH=""
 
@@ -51,7 +51,7 @@ detect_version() {
 
 build_release_binaries() {
   if [[ "$SKIP_BUILD" == "1" ]]; then
-    log "skipping release build because GPUSTAT4CLUSTER_RPM_SKIP_BUILD=1"
+    log "skipping release build because CLUSTAT_RPM_SKIP_BUILD=1"
     return 0
   fi
 
@@ -61,9 +61,9 @@ build_release_binaries() {
   log "building native release server/client binaries"
   (
     cd "$ROOT_DIR"
-    cargo build --locked --release -p server --features nvml
-    cargo build --locked --release -p gpustat4cluster-client-backend
-    cargo build --locked --release -p gpustat4cluster-client-cli
+    cargo build --locked --release -p clustat-server --features nvml
+    cargo build --locked --release -p clustat-client-backend
+    cargo build --locked --release -p clustat-client-cli
   )
 
   if [[ "$MULTIARCH" == "1" ]]; then
@@ -79,27 +79,27 @@ build_release_binaries() {
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER:-rust-lld}"
           ;;
       esac
-      cargo build --locked --release --target "$ARM64_TARGET" -p server --features nvml
-      cargo build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-backend
-      cargo build --locked --release --target "$ARM64_TARGET" -p gpustat4cluster-client-cli
+      cargo build --locked --release --target "$ARM64_TARGET" -p clustat-server --features nvml
+      cargo build --locked --release --target "$ARM64_TARGET" -p clustat-client-backend
+      cargo build --locked --release --target "$ARM64_TARGET" -p clustat-client-cli
     )
   fi
 }
 
 native_binary_path() {
   case "$1" in
-    server) printf '%s/target/release/server\n' "$ROOT_DIR" ;;
-    gpustat4cluster-client-backend) printf '%s/target/release/gpustat4cluster-client-backend\n' "$ROOT_DIR" ;;
-    gpustat4cluster-client) printf '%s/target/release/gpustat4cluster\n' "$ROOT_DIR" ;;
+    server) printf '%s/target/release/clustat-server\n' "$ROOT_DIR" ;;
+    clustat-client-backend) printf '%s/target/release/clustat-backend\n' "$ROOT_DIR" ;;
+    clustat-client) printf '%s/target/release/clustat\n' "$ROOT_DIR" ;;
   esac
 }
 
 arm64_binary_path() {
   local bin="$1" env_name=""
   case "$bin" in
-    server) env_name="GPUSTAT4CLUSTER_ARM64_SERVER_BIN" ;;
-    gpustat4cluster-client-backend) env_name="GPUSTAT4CLUSTER_ARM64_CLIENT_BACKEND_BIN" ;;
-    gpustat4cluster-client) env_name="GPUSTAT4CLUSTER_ARM64_CLIENT_BIN" ;;
+    server) env_name="CLUSTAT_ARM64_SERVER_BIN" ;;
+    clustat-client-backend) env_name="CLUSTAT_ARM64_CLIENT_BACKEND_BIN" ;;
+    clustat-client) env_name="CLUSTAT_ARM64_CLIENT_BIN" ;;
   esac
   local override="${!env_name:-}"
   if [[ -n "$override" ]]; then
@@ -107,9 +107,9 @@ arm64_binary_path() {
     return 0
   fi
   case "$bin" in
-    server) printf '%s/target/%s/release/server\n' "$ROOT_DIR" "$ARM64_TARGET" ;;
-    gpustat4cluster-client-backend) printf '%s/target/%s/release/gpustat4cluster-client-backend\n' "$ROOT_DIR" "$ARM64_TARGET" ;;
-    gpustat4cluster-client) printf '%s/target/%s/release/gpustat4cluster\n' "$ROOT_DIR" "$ARM64_TARGET" ;;
+    server) printf '%s/target/%s/release/clustat-server\n' "$ROOT_DIR" "$ARM64_TARGET" ;;
+    clustat-client-backend) printf '%s/target/%s/release/clustat-backend\n' "$ROOT_DIR" "$ARM64_TARGET" ;;
+    clustat-client) printf '%s/target/%s/release/clustat\n' "$ROOT_DIR" "$ARM64_TARGET" ;;
   esac
 }
 
@@ -122,24 +122,24 @@ ROLE="$role"
 case "\$(uname -m)" in
     x86_64|amd64) ARCH="amd64" ;;
     aarch64|arm64) ARCH="arm64" ;;
-    *) echo "gpustat4cluster: unsupported architecture \$(uname -m)" >&2; exit 1 ;;
+    *) echo "clustat: unsupported architecture \$(uname -m)" >&2; exit 1 ;;
 esac
-SRC_DIR="/usr/lib/gpustat4cluster/\$ARCH/bin"
+SRC_DIR="/usr/lib/clustat/\$ARCH/bin"
 if [ ! -d "\$SRC_DIR" ]; then
-    echo "gpustat4cluster: unsupported architecture \$ARCH; available binaries are under /usr/lib/gpustat4cluster" >&2
+    echo "clustat: unsupported architecture \$ARCH; available binaries are under /usr/lib/clustat" >&2
     exit 1
 fi
 install -d -m 0755 /usr/local/bin
 case "\$ROLE" in
     server)
-        ln -sfn "\$SRC_DIR/gpustat4cluster-server" /usr/local/bin/gpustat4cluster-server
+        ln -sfn "\$SRC_DIR/clustat-server" /usr/local/bin/clustat-server
         ;;
     client)
-        ln -sfn "\$SRC_DIR/gpustat4cluster-client" /usr/local/bin/gpustat4cluster-client
-        ln -sfn "\$SRC_DIR/gpustat4cluster-client-backend" /usr/local/bin/gpustat4cluster-client-backend
+        ln -sfn "\$SRC_DIR/clustat" /usr/local/bin/clustat
+        ln -sfn "\$SRC_DIR/clustat-backend" /usr/local/bin/clustat-backend
         ;;
     *)
-        echo "gpustat4cluster: invalid role \$ROLE" >&2
+        echo "clustat: invalid role \$ROLE" >&2
         exit 1
         ;;
 esac
@@ -150,16 +150,16 @@ SELECTOREOF
 stage_common_files() {
   local pkgroot="$1" role="$2"
   mkdir -p \
-    "$pkgroot/etc/gpustat4cluster" \
+    "$pkgroot/etc/clustat" \
     "$pkgroot/usr/lib/systemd/system" \
-    "$pkgroot/usr/lib/gpustat4cluster"
+    "$pkgroot/usr/lib/clustat"
 
-  local role_config="$ROOT_DIR/dist/etc/gpustat4cluster/${role}.toml.example"
+  local role_config="$ROOT_DIR/dist/etc/clustat/${role}.toml.example"
   [[ -f "$role_config" ]] || fail "missing role config: $role_config"
-  cp "$role_config" "$pkgroot/etc/gpustat4cluster/${role}.toml.example"
-  cp "$role_config" "$pkgroot/etc/gpustat4cluster/${role}.toml"
-  cp "$ROOT_DIR/packaging/systemd/gpustat4cluster-${role}.service" \
-    "$pkgroot/usr/lib/systemd/system/gpustat4cluster-${role}.service"
+  cp "$role_config" "$pkgroot/etc/clustat/${role}.toml.example"
+  cp "$role_config" "$pkgroot/etc/clustat/${role}.toml"
+  cp "$ROOT_DIR/packaging/systemd/clustat-${role}.service" \
+    "$pkgroot/usr/lib/systemd/system/clustat-${role}.service"
 }
 
 stage_role_files() {
@@ -167,24 +167,24 @@ stage_role_files() {
   stage_common_files "$pkgroot" "$role"
 
   if [[ "$MULTIARCH" == "1" ]]; then
-    mkdir -p "$pkgroot/usr/lib/gpustat4cluster/amd64/bin" "$pkgroot/usr/lib/gpustat4cluster/arm64/bin"
+    mkdir -p "$pkgroot/usr/lib/clustat/amd64/bin" "$pkgroot/usr/lib/clustat/arm64/bin"
     if [[ "$role" == "server" ]]; then
-      cp "$(native_binary_path server)" "$pkgroot/usr/lib/gpustat4cluster/amd64/bin/gpustat4cluster-server"
-      cp "$(arm64_binary_path server)" "$pkgroot/usr/lib/gpustat4cluster/arm64/bin/gpustat4cluster-server"
+      cp "$(native_binary_path server)" "$pkgroot/usr/lib/clustat/amd64/bin/clustat-server"
+      cp "$(arm64_binary_path server)" "$pkgroot/usr/lib/clustat/arm64/bin/clustat-server"
     else
-      cp "$(native_binary_path gpustat4cluster-client)" "$pkgroot/usr/lib/gpustat4cluster/amd64/bin/gpustat4cluster-client"
-      cp "$(native_binary_path gpustat4cluster-client-backend)" "$pkgroot/usr/lib/gpustat4cluster/amd64/bin/gpustat4cluster-client-backend"
-      cp "$(arm64_binary_path gpustat4cluster-client)" "$pkgroot/usr/lib/gpustat4cluster/arm64/bin/gpustat4cluster-client"
-      cp "$(arm64_binary_path gpustat4cluster-client-backend)" "$pkgroot/usr/lib/gpustat4cluster/arm64/bin/gpustat4cluster-client-backend"
+      cp "$(native_binary_path clustat-client)" "$pkgroot/usr/lib/clustat/amd64/bin/clustat"
+      cp "$(native_binary_path clustat-client-backend)" "$pkgroot/usr/lib/clustat/amd64/bin/clustat-backend"
+      cp "$(arm64_binary_path clustat-client)" "$pkgroot/usr/lib/clustat/arm64/bin/clustat"
+      cp "$(arm64_binary_path clustat-client-backend)" "$pkgroot/usr/lib/clustat/arm64/bin/clustat-backend"
     fi
-    write_arch_selector "$pkgroot/usr/lib/gpustat4cluster/select-binary" "$role"
+    write_arch_selector "$pkgroot/usr/lib/clustat/select-binary" "$role"
   else
     mkdir -p "$pkgroot/usr/local/bin"
     if [[ "$role" == "server" ]]; then
-      cp "$(native_binary_path server)" "$pkgroot/usr/local/bin/gpustat4cluster-server"
+      cp "$(native_binary_path server)" "$pkgroot/usr/local/bin/clustat-server"
     else
-      cp "$(native_binary_path gpustat4cluster-client)" "$pkgroot/usr/local/bin/gpustat4cluster-client"
-      cp "$(native_binary_path gpustat4cluster-client-backend)" "$pkgroot/usr/local/bin/gpustat4cluster-client-backend"
+      cp "$(native_binary_path clustat-client)" "$pkgroot/usr/local/bin/clustat"
+      cp "$(native_binary_path clustat-client-backend)" "$pkgroot/usr/local/bin/clustat-backend"
     fi
   fi
 }
@@ -192,10 +192,10 @@ stage_role_files() {
 write_spec() {
   local spec="$1"
   local role="$2"
-  local package="gpustat4cluster-${role}"
-  local summary="gpustat4cluster ${role} daemon"
+  local package="clustat-${role}"
+  local summary="clustat ${role} daemon"
   if [[ "$role" == "client" ]]; then
-    summary="gpustat4cluster client backend and CLI"
+    summary="clustat client backend and CLI"
   fi
 
   cat >"$spec" <<SPECEOF
@@ -212,7 +212,7 @@ Requires:       systemd
 %global _binaries_in_noarch_packages_terminate_build 0
 
 %description
-gpustat4cluster provides low-latency GPU status collection and display across a cluster.
+clustat provides low-latency GPU status collection and display across a cluster.
 
 %prep
 
@@ -223,11 +223,11 @@ rm -rf %{buildroot}
 cp -a %{_sourcedir}/root/. %{buildroot}/
 
 %post
-getent group gpustat4cluster >/dev/null 2>&1 || groupadd -r gpustat4cluster || true
-id -u gpustat4cluster >/dev/null 2>&1 || useradd -r -g gpustat4cluster -d /var/lib/gpustat4cluster -s /sbin/nologin -c "gpustat4cluster service user" gpustat4cluster || true
-install -d -o gpustat4cluster -g gpustat4cluster -m 0755 /var/lib/gpustat4cluster /var/log/gpustat4cluster /run/gpustat4cluster || true
-if [ -x /usr/lib/gpustat4cluster/select-binary ]; then
-    /usr/lib/gpustat4cluster/select-binary $role || true
+getent group clustat >/dev/null 2>&1 || groupadd -r clustat || true
+id -u clustat >/dev/null 2>&1 || useradd -r -g clustat -d /var/lib/clustat -s /sbin/nologin -c "clustat service user" clustat || true
+install -d -o clustat -g clustat -m 0755 /var/lib/clustat /var/log/clustat /run/clustat || true
+if [ -x /usr/lib/clustat/select-binary ]; then
+    /usr/lib/clustat/select-binary $role || true
 fi
 SPECEOF
 
@@ -235,9 +235,9 @@ SPECEOF
     cat >>"$spec" <<'SPECEOF'
 if ! command -v gpustat >/dev/null 2>&1; then
     if [ ! -e /usr/local/bin/gpustat ] && [ ! -L /usr/local/bin/gpustat ]; then
-        ln -s /usr/local/bin/gpustat4cluster-client /usr/local/bin/gpustat || true
+        ln -s /usr/local/bin/clustat /usr/local/bin/gpustat || true
     else
-        echo "gpustat4cluster: warning: /usr/local/bin/gpustat already exists but is not runnable; leaving it untouched" >&2
+        echo "clustat: warning: /usr/local/bin/gpustat already exists but is not runnable; leaving it untouched" >&2
     fi
 fi
 SPECEOF
@@ -246,35 +246,35 @@ SPECEOF
   cat >>"$spec" <<SPECEOF
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
-    if [ "\${GPUSTAT4CLUSTER_RPM_START:-1}" = "1" ]; then
-        systemctl enable --now gpustat4cluster-${role}.service || echo "gpustat4cluster: warning: failed to enable/start gpustat4cluster-${role}.service; check journalctl -u gpustat4cluster-${role}" >&2
+    if [ "\${CLUSTAT_RPM_START:-1}" = "1" ]; then
+        systemctl enable --now clustat-${role}.service || echo "clustat: warning: failed to enable/start clustat-${role}.service; check journalctl -u clustat-${role}" >&2
     else
-        systemctl enable gpustat4cluster-${role}.service || true
+        systemctl enable clustat-${role}.service || true
     fi
 fi
 
 %preun
 if [ \$1 -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
-    systemctl disable --now gpustat4cluster-${role}.service >/dev/null 2>&1 || true
+    systemctl disable --now clustat-${role}.service >/dev/null 2>&1 || true
 fi
 SPECEOF
 
   if [[ "$role" == "client" ]]; then
     cat >>"$spec" <<'SPECEOF'
-if [ $1 -eq 0 ] && [ "$(readlink /usr/local/bin/gpustat4cluster-client 2>/dev/null || true)" = "/usr/lib/gpustat4cluster/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')/bin/gpustat4cluster-client" ]; then
-    rm -f /usr/local/bin/gpustat4cluster-client
+if [ $1 -eq 0 ] && [ "$(readlink /usr/local/bin/clustat 2>/dev/null || true)" = "/usr/lib/clustat/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')/bin/clustat" ]; then
+    rm -f /usr/local/bin/clustat
 fi
-if [ $1 -eq 0 ] && [ "$(readlink /usr/local/bin/gpustat4cluster-client-backend 2>/dev/null || true)" = "/usr/lib/gpustat4cluster/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')/bin/gpustat4cluster-client-backend" ]; then
-    rm -f /usr/local/bin/gpustat4cluster-client-backend
+if [ $1 -eq 0 ] && [ "$(readlink /usr/local/bin/clustat-backend 2>/dev/null || true)" = "/usr/lib/clustat/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')/bin/clustat-backend" ]; then
+    rm -f /usr/local/bin/clustat-backend
 fi
-if [ $1 -eq 0 ] && [ "$(readlink /usr/local/bin/gpustat 2>/dev/null || true)" = "/usr/local/bin/gpustat4cluster-client" ]; then
+if [ $1 -eq 0 ] && [ "$(readlink /usr/local/bin/gpustat 2>/dev/null || true)" = "/usr/local/bin/clustat" ]; then
     rm -f /usr/local/bin/gpustat
 fi
 SPECEOF
   elif [[ "$role" == "server" ]]; then
     cat >>"$spec" <<'SPECEOF'
-if [ $1 -eq 0 ] && [ "$(readlink /usr/local/bin/gpustat4cluster-server 2>/dev/null || true)" = "/usr/lib/gpustat4cluster/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')/bin/gpustat4cluster-server" ]; then
-    rm -f /usr/local/bin/gpustat4cluster-server
+if [ $1 -eq 0 ] && [ "$(readlink /usr/local/bin/clustat-server 2>/dev/null || true)" = "/usr/lib/clustat/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')/bin/clustat-server" ]; then
+    rm -f /usr/local/bin/clustat-server
 fi
 SPECEOF
   fi
@@ -288,25 +288,25 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 %files
-%config(noreplace) /etc/gpustat4cluster/${role}.toml
-/etc/gpustat4cluster/${role}.toml.example
-/usr/lib/systemd/system/gpustat4cluster-${role}.service
+%config(noreplace) /etc/clustat/${role}.toml
+/etc/clustat/${role}.toml.example
+/usr/lib/systemd/system/clustat-${role}.service
 SPECEOF
 
   if [[ "$MULTIARCH" == "1" ]]; then
     cat >>"$spec" <<'SPECEOF'
-/usr/lib/gpustat4cluster
+/usr/lib/clustat
 SPECEOF
   else
     cat >>"$spec" <<SPECEOF
-/usr/local/bin/gpustat4cluster-*
+/usr/local/bin/clustat-*
 SPECEOF
   fi
 
   cat >>"$spec" <<SPECEOF
 
 %changelog
-* Thu May 21 2026 gpustat4cluster maintainers <root@localhost> - $VERSION-$REVISION
+* Thu May 21 2026 clustat maintainers <root@localhost> - $VERSION-$REVISION
 - Automated release package.
 SPECEOF
 }
@@ -315,13 +315,13 @@ package_role() {
   local role="$1"
   local topdir="$TMP_DIR/rpmbuild-${role}"
   local pkgroot="$topdir/SOURCES/root"
-  local spec="$topdir/SPECS/gpustat4cluster-${role}.spec"
+  local spec="$topdir/SPECS/clustat-${role}.spec"
   mkdir -p "$topdir/BUILD" "$topdir/BUILDROOT" "$topdir/RPMS" "$topdir/SOURCES" "$topdir/SPECS" "$topdir/SRPMS"
   stage_role_files "$pkgroot" "$role"
   find "$pkgroot" -type d -exec chmod 0755 {} +
   find "$pkgroot" -type f -exec chmod 0644 {} +
   find "$pkgroot" -path '*/bin/*' -type f -exec chmod 0755 {} +
-  [[ -f "$pkgroot/usr/lib/gpustat4cluster/select-binary" ]] && chmod 0755 "$pkgroot/usr/lib/gpustat4cluster/select-binary"
+  [[ -f "$pkgroot/usr/lib/clustat/select-binary" ]] && chmod 0755 "$pkgroot/usr/lib/clustat/select-binary"
   write_spec "$spec" "$role"
   rpmbuild --define "_topdir $topdir" -bb "$spec" >/dev/null || fail "failed to build RPM for $role"
   find "$topdir/RPMS" -type f -name '*.rpm' -exec cp {} "$OUT_DIR/" \;

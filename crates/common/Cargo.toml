@@ -1,9 +1,9 @@
 [package]
 name = "common"
-version = "0.1.1"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
-description = "Common protocol/config types for gpustat4cluster"
+description = "Common protocol/config types for clustat"
 
 [dependencies]
 crc32fast = "1"

@@ -1,10 +1,10 @@
 [package]
-name = "gpustat4cluster-client-cli"
-version = "0.1.1"
+name = "clustat-client-cli"
+version = "1.0.0"
 edition = "2021"
 
 [[bin]]
-name = "gpustat4cluster"
+name = "clustat"
 path = "src/main.rs"
 
 [dependencies]

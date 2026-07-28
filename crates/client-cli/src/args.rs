@@ -47,7 +47,7 @@ pub fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
     while i < args.len() {
         match args[i].as_str() {
             "-h" | "--help" => return Err(help_text().to_string()),
-            "-v" | "--version" => return Err("gpustat4cluster 0.1.1".to_string()),
+            "-v" | "--version" => return Err("clustat 1.0.0".to_string()),
             "-n" => {
                 i += 1;
                 opts.node_filter = Some(required_value(&args, i, "-n")?.to_string());
@@ -140,7 +140,7 @@ pub fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
 }
 
 pub fn help_text() -> &'static str {
-    "Usage: gpustat4cluster-client [OPTIONS]\n\nOptions:\n  -n <FILTER>                 Filter cluster nodes by hostname/ip/connection id\n  -user <USER>                Filter rendered processes/GPU rows by user\n  --backend-socket <PATH>     Connect to client-backend UDS path\n  --json                      Print cluster data as JSON\n  -i, --interval [SEC]        Watch mode; optional refresh interval in seconds\n  -w, --watch [SEC]           Alias for --interval\n  --color, --force-color      Force ANSI colored output\n  --no-color                  Suppress ANSI colored output\n  --no-header                 Suppress node header lines\n  --gpuname-width <N>         GPU name display width; 0 hides GPU names\n  --no-processes              Hide process summaries\n  -c, --show-cmd              Display process command instead of user\n  -u, --show-user             Display process user with command\n  -p, --show-pid              Display process PID\n  -a, --show-all              Show user, command and PID\n  -h, --help                  Show this help\n  -v, --version               Show version"
+    "Usage: clustat [OPTIONS]\n\nOptions:\n  -n <FILTER>                 Filter cluster nodes by hostname/ip/connection id\n  -user <USER>                Filter rendered processes/GPU rows by user\n  --backend-socket <PATH>     Connect to client-backend UDS path\n  --json                      Print cluster data as JSON\n  -i, --interval [SEC]        Watch mode; optional refresh interval in seconds\n  -w, --watch [SEC]           Alias for --interval\n  --color, --force-color      Force ANSI colored output\n  --no-color                  Suppress ANSI colored output\n  --no-header                 Suppress node header lines\n  --gpuname-width <N>         GPU name display width; 0 hides GPU names\n  --no-processes              Hide process summaries\n  -c, --show-cmd              Display process command instead of user\n  -u, --show-user             Display process user with command\n  -p, --show-pid              Display process PID\n  -a, --show-all              Show user, command and PID\n  -h, --help                  Show this help\n  -v, --version               Show version"
 }
 
 fn required_value<'a>(args: &'a [String], index: usize, flag: &str) -> Result<&'a str, String> {
@@ -242,10 +242,7 @@ mod tests {
 
     #[test]
     fn parses_backend_socket() {
-        let opts = parse_args(args(&["--backend-socket", "/tmp/gpustat4cluster.sock"])).unwrap();
-        assert_eq!(
-            opts.backend_socket.as_deref(),
-            Some("/tmp/gpustat4cluster.sock")
-        );
+        let opts = parse_args(args(&["--backend-socket", "/tmp/clustat.sock"])).unwrap();
+        assert_eq!(opts.backend_socket.as_deref(), Some("/tmp/clustat.sock"));
     }
 }
