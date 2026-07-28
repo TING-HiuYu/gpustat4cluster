@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::args::CliOptions;
 
 #[cfg_attr(not(unix), allow(dead_code))]
-pub const BACKEND_SOCKET_ENV: &str = "GPUSTAT4CLUSTER_BACKEND_SOCKET";
-pub const CONFIG_PATH_ENV: &str = "GPUSTAT4CLUSTER_CONFIG";
-pub const DEFAULT_CONFIG_PATH: &str = "/etc/gpustat4cluster/client.toml";
+pub const BACKEND_SOCKET_ENV: &str = "CLUSTAT_BACKEND_SOCKET";
+pub const CONFIG_PATH_ENV: &str = "CLUSTAT_CONFIG";
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/clustat/client.toml";
 #[cfg_attr(not(unix), allow(dead_code))]
-pub const DEFAULT_BACKEND_SOCKET: &str = "/run/gpustat4cluster/client.sock";
+pub const DEFAULT_BACKEND_SOCKET: &str = "/run/clustat/client.sock";
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct QueryResponse {
@@ -117,7 +117,7 @@ pub fn connect_backend(opts: &CliOptions) -> Result<BackendConnection, String> {
     let socket_path = backend_socket_from_options(opts);
     let stream = UnixStream::connect(&socket_path).map_err(|e| {
         format!(
-            "backend UDS 未运行：请先启动 gpustat4cluster-client-backend（{}）。连接失败: {}",
+            "backend UDS 未运行：请先启动 clustat-backend（{}）。连接失败: {}",
             socket_path, e
         )
     })?;
@@ -155,7 +155,7 @@ where
 #[cfg(not(unix))]
 fn unsupported_backend<T>() -> Result<T, String> {
     Err(
-        "gpustat4cluster client on this platform can render data but cannot connect to the local UDS backend yet; use Linux or macOS for live cluster queries"
+        "clustat client on this platform can render data but cannot connect to the local UDS backend yet; use Linux or macOS for live cluster queries"
             .to_string(),
     )
 }

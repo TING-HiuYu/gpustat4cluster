@@ -7,14 +7,14 @@ LIBC="gnu"
 DRY_RUN=0
 
 PREFIX="${PREFIX:-/usr/local/bin}"
-ETC_DIR="${ETC_DIR:-/etc/gpustat4cluster}"
+ETC_DIR="${ETC_DIR:-/etc/clustat}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
-TMP_DIR="${TMP_DIR:-/tmp/gpustat4cluster-install}"
-REPO="${REPO:-TING-HiuYu/gpustat4cluster}"
+TMP_DIR="${TMP_DIR:-/tmp/clustat-install}"
+REPO="${REPO:-TING-HiuYu/clustat}"
 LOCAL_TARBALL_DIR="${LOCAL_TARBALL_DIR:-}"
 ROOT_DIR="${ROOT_DIR:-/}"
-SERVICE_USER="${SERVICE_USER:-gpustat4cluster}"
-SERVICE_GROUP="${SERVICE_GROUP:-gpustat4cluster}"
+SERVICE_USER="${SERVICE_USER:-clustat}"
+SERVICE_GROUP="${SERVICE_GROUP:-clustat}"
 
 require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "missing command: $1" >&2; exit 1; }; }
 
@@ -113,7 +113,7 @@ create_service_user() {
     as_root useradd \
       --system \
       --gid "$SERVICE_GROUP" \
-      --home-dir /var/lib/gpustat4cluster \
+      --home-dir /var/lib/clustat \
       --create-home \
       --shell "$nologin_shell" \
       "$SERVICE_USER"
@@ -123,7 +123,7 @@ create_service_user() {
 asset_name() {
   local role="$1"
   local ver="$2"
-  echo "gpustat4cluster-${role}-${ver}-linux-${ARCH}-${LIBC}.tar.gz"
+  echo "clustat-${role}-${ver}-linux-${ARCH}-${LIBC}.tar.gz"
 }
 
 resolve_tag() {
@@ -265,10 +265,10 @@ install_systemd() {
 
   as_root systemctl daemon-reload
   if [[ "$ROLE" == "server" || "$ROLE" == "both" ]]; then
-    as_root systemctl enable --now gpustat4cluster-server.service || true
+    as_root systemctl enable --now clustat-server.service || true
   fi
   if [[ "$ROLE" == "client" || "$ROLE" == "both" ]]; then
-    as_root systemctl enable --now gpustat4cluster-client.service || true
+    as_root systemctl enable --now clustat-client.service || true
   fi
 }
 

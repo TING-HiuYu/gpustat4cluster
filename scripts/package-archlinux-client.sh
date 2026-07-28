@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${GPUSTAT4CLUSTER_ARCH_OUT_DIR:-$ROOT_DIR/dist}"
-VERSION="${GPUSTAT4CLUSTER_ARCH_VERSION:-}"
-REVISION="${GPUSTAT4CLUSTER_ARCH_REVISION:-1}"
-SKIP_BUILD="${GPUSTAT4CLUSTER_ARCH_SKIP_BUILD:-0}"
+OUT_DIR="${CLUSTAT_ARCH_OUT_DIR:-$ROOT_DIR/dist}"
+VERSION="${CLUSTAT_ARCH_VERSION:-}"
+REVISION="${CLUSTAT_ARCH_REVISION:-1}"
+SKIP_BUILD="${CLUSTAT_ARCH_SKIP_BUILD:-0}"
 TMP_DIR=""
 ARCH=""
 
@@ -49,7 +49,7 @@ detect_version() {
 
 build_release_binaries() {
   if [[ "$SKIP_BUILD" == "1" ]]; then
-    log "skipping release build because GPUSTAT4CLUSTER_ARCH_SKIP_BUILD=1"
+    log "skipping release build because CLUSTAT_ARCH_SKIP_BUILD=1"
     return 0
   fi
   load_rust_module_if_needed
@@ -57,8 +57,8 @@ build_release_binaries() {
   log "building native release client binaries"
   (
     cd "$ROOT_DIR"
-    cargo build --locked --release -p gpustat4cluster-client-backend
-    cargo build --locked --release -p gpustat4cluster-client-cli
+    cargo build --locked --release -p clustat-client-backend
+    cargo build --locked --release -p clustat-client-cli
   )
 }
 
@@ -66,26 +66,26 @@ write_install_script() {
   local path="$1"
   cat >"$path" <<'INSTALL'
 post_install() {
-  getent group gpustat4cluster >/dev/null 2>&1 || groupadd -r gpustat4cluster || true
-  id -u gpustat4cluster >/dev/null 2>&1 || useradd -r -g gpustat4cluster -d /var/lib/gpustat4cluster -s /usr/bin/nologin -c "gpustat4cluster service user" gpustat4cluster || true
-  install -d -o gpustat4cluster -g gpustat4cluster -m 0755 /var/lib/gpustat4cluster /var/log/gpustat4cluster /run/gpustat4cluster || true
-  install -d -o root -g root -m 0755 /etc/gpustat4cluster || true
-  if [ ! -f /etc/gpustat4cluster/client.toml ] && [ -f /etc/gpustat4cluster/client.toml.example ]; then
-    cp /etc/gpustat4cluster/client.toml.example /etc/gpustat4cluster/client.toml
+  getent group clustat >/dev/null 2>&1 || groupadd -r clustat || true
+  id -u clustat >/dev/null 2>&1 || useradd -r -g clustat -d /var/lib/clustat -s /usr/bin/nologin -c "clustat service user" clustat || true
+  install -d -o clustat -g clustat -m 0755 /var/lib/clustat /var/log/clustat /run/clustat || true
+  install -d -o root -g root -m 0755 /etc/clustat || true
+  if [ ! -f /etc/clustat/client.toml ] && [ -f /etc/clustat/client.toml.example ]; then
+    cp /etc/clustat/client.toml.example /etc/clustat/client.toml
   fi
   if ! command -v gpustat >/dev/null 2>&1; then
     if [ ! -e /usr/local/bin/gpustat ] && [ ! -L /usr/local/bin/gpustat ]; then
-      ln -s /usr/local/bin/gpustat4cluster-client /usr/local/bin/gpustat || true
+      ln -s /usr/local/bin/clustat /usr/local/bin/gpustat || true
     else
-      echo "gpustat4cluster: warning: /usr/local/bin/gpustat already exists but is not runnable; leaving it untouched" >&2
+      echo "clustat: warning: /usr/local/bin/gpustat already exists but is not runnable; leaving it untouched" >&2
     fi
   fi
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
-    if [ "${GPUSTAT4CLUSTER_ARCH_START:-1}" = "1" ]; then
-      systemctl enable --now gpustat4cluster-client.service || echo "gpustat4cluster: warning: failed to enable/start gpustat4cluster-client.service; check journalctl -u gpustat4cluster-client" >&2
+    if [ "${CLUSTAT_ARCH_START:-1}" = "1" ]; then
+      systemctl enable --now clustat-client.service || echo "clustat: warning: failed to enable/start clustat-client.service; check journalctl -u clustat-client" >&2
     else
-      systemctl enable gpustat4cluster-client.service || true
+      systemctl enable clustat-client.service || true
     fi
   fi
 }
@@ -96,9 +96,9 @@ post_upgrade() {
 
 pre_remove() {
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl disable --now gpustat4cluster-client.service >/dev/null 2>&1 || true
+    systemctl disable --now clustat-client.service >/dev/null 2>&1 || true
   fi
-  if [ "$(readlink /usr/local/bin/gpustat 2>/dev/null || true)" = "/usr/local/bin/gpustat4cluster-client" ]; then
+  if [ "$(readlink /usr/local/bin/gpustat 2>/dev/null || true)" = "/usr/local/bin/clustat" ]; then
     rm -f /usr/local/bin/gpustat
   fi
 }
@@ -117,16 +117,16 @@ stage_package_root() {
   mkdir -p \
     "$pkgroot/usr/local/bin" \
     "$pkgroot/usr/lib/systemd/system" \
-    "$pkgroot/etc/gpustat4cluster"
+    "$pkgroot/etc/clustat"
 
-  cp "$ROOT_DIR/target/release/gpustat4cluster" "$pkgroot/usr/local/bin/gpustat4cluster-client"
-  cp "$ROOT_DIR/target/release/gpustat4cluster-client-backend" "$pkgroot/usr/local/bin/gpustat4cluster-client-backend"
-  cp "$ROOT_DIR/packaging/systemd/gpustat4cluster-client.service" "$pkgroot/usr/lib/systemd/system/gpustat4cluster-client.service"
-  cp "$ROOT_DIR/dist/etc/gpustat4cluster/client.toml.example" "$pkgroot/etc/gpustat4cluster/client.toml.example"
-  cp "$ROOT_DIR/dist/etc/gpustat4cluster/client.toml.example" "$pkgroot/etc/gpustat4cluster/client.toml"
+  cp "$ROOT_DIR/target/release/clustat" "$pkgroot/usr/local/bin/clustat"
+  cp "$ROOT_DIR/target/release/clustat-backend" "$pkgroot/usr/local/bin/clustat-backend"
+  cp "$ROOT_DIR/packaging/systemd/clustat-client.service" "$pkgroot/usr/lib/systemd/system/clustat-client.service"
+  cp "$ROOT_DIR/dist/etc/clustat/client.toml.example" "$pkgroot/etc/clustat/client.toml.example"
+  cp "$ROOT_DIR/dist/etc/clustat/client.toml.example" "$pkgroot/etc/clustat/client.toml"
 
-  chmod 0755 "$pkgroot/usr/local/bin/gpustat4cluster-client" "$pkgroot/usr/local/bin/gpustat4cluster-client-backend"
-  chmod 0644 "$pkgroot/usr/lib/systemd/system/gpustat4cluster-client.service" "$pkgroot/etc/gpustat4cluster/client.toml" "$pkgroot/etc/gpustat4cluster/client.toml.example"
+  chmod 0755 "$pkgroot/usr/local/bin/clustat" "$pkgroot/usr/local/bin/clustat-backend"
+  chmod 0644 "$pkgroot/usr/lib/systemd/system/clustat-client.service" "$pkgroot/etc/clustat/client.toml" "$pkgroot/etc/clustat/client.toml.example"
 }
 
 write_pkginfo() {
@@ -135,20 +135,20 @@ write_pkginfo() {
   size="$(du -sk "$pkgroot" | awk '{print $1 * 1024}')"
   builddate="${SOURCE_DATE_EPOCH:-$(date +%s)}"
   cat >"$pkgroot/.PKGINFO" <<PKGINFO
-pkgname = gpustat4cluster-client
-pkgbase = gpustat4cluster-client
+pkgname = clustat
+pkgbase = clustat
 pkgver = ${VERSION}-${REVISION}
-pkgdesc = gpustat4cluster client backend and CLI
-url = https://github.com/hiuyu/gpustat4cluster
+pkgdesc = clustat client backend and CLI
+url = https://github.com/hiuyu/clustat
 builddate = $builddate
-packager = gpustat4cluster maintainers <root@localhost>
+packager = clustat maintainers <root@localhost>
 size = $size
 arch = $ARCH
 license = MIT
 depend = glibc
 depend = gcc-libs
 depend = systemd
-backup = etc/gpustat4cluster/client.toml
+backup = etc/clustat/client.toml
 PKGINFO
 }
 
@@ -162,7 +162,7 @@ package_client() {
   write_pkginfo "$pkgroot"
   write_install_script "$pkgroot/.INSTALL"
   chmod 0644 "$pkgroot/.PKGINFO" "$pkgroot/.INSTALL"
-  local artifact="$OUT_DIR/gpustat4cluster-client-${VERSION}-${REVISION}-${ARCH}.pkg.tar.zst"
+  local artifact="$OUT_DIR/clustat-client-${VERSION}-${REVISION}-${ARCH}.pkg.tar.zst"
   log "building Arch Linux package $artifact"
   tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner --zstd -C "$pkgroot" -cf "$artifact" .
 }

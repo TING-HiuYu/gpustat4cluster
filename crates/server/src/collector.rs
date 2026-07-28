@@ -802,7 +802,7 @@ impl GresCollector for NvmlCollector {
 }
 
 fn simulate_nvml_missing() -> bool {
-    env_truthy("GPUSTAT4CLUSTER_SIMULATE_NVML_MISSING")
+    env_truthy("CLUSTAT_SIMULATE_NVML_MISSING")
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -909,7 +909,7 @@ mod real_nvml {
         let hint = if context == "init" {
             "If this happened at startup, configure [runtime].nvml_lib_path to a real NVIDIA NVML library, for example /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1. Do not use CUDA stubs/libnvidia-ml.so."
         } else {
-            "NVML returned an error during collection; verify the NVIDIA driver is healthy and accessible to the gpustat4cluster service user."
+            "NVML returned an error during collection; verify the NVIDIA driver is healthy and accessible to the clustat service user."
         };
         eprintln!(
             "{}",

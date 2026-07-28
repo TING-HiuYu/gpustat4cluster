@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use crate::{adapter, cache::SharedCache, connection::SharedServerConnection, discovery, logger};
 
-pub const DEFAULT_BACKEND_SOCKET: &str = "/run/gpustat4cluster/client.sock";
-pub const BACKEND_SOCKET_ENV: &str = "GPUSTAT4CLUSTER_BACKEND_SOCKET";
+pub const DEFAULT_BACKEND_SOCKET: &str = "/run/clustat/client.sock";
+pub const BACKEND_SOCKET_ENV: &str = "CLUSTAT_BACKEND_SOCKET";
 
 #[derive(Clone)]
 pub struct LocalApiState {

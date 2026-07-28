@@ -11,7 +11,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::logger;
 
-pub const STATIC_NODES_ENV: &str = "GPUSTAT4CLUSTER_STATIC_NODES";
+pub const STATIC_NODES_ENV: &str = "CLUSTAT_STATIC_NODES";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredNode {

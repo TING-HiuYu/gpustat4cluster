@@ -5,8 +5,8 @@ use std::{
 
 use common::Config;
 
-const DEFAULT_CONFIG_PATH: &str = "/etc/gpustat4cluster/client.toml";
-const CONFIG_PATH_ENV: &str = "GPUSTAT4CLUSTER_CONFIG";
+const DEFAULT_CONFIG_PATH: &str = "/etc/clustat/client.toml";
+const CONFIG_PATH_ENV: &str = "CLUSTAT_CONFIG";
 
 pub fn get_config_path() -> PathBuf {
     std::env::var(CONFIG_PATH_ENV)

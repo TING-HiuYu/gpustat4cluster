@@ -1,6 +1,6 @@
 [package]
-name = "server"
-version = "0.1.1"
+name = "clustat-server"
+version = "1.0.0"
 edition = "2021"
 
 [features]

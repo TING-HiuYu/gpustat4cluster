@@ -98,8 +98,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "clustat-client-backend"
+version = "1.0.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "common",
+ "serde",
+ "serde_json",
+ "socket2",
+ "toml",
+]
+
+[[package]]
+name = "clustat-client-cli"
+version = "1.0.0"
+dependencies = [
+ "chrono",
+ "common",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "clustat-server"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "common",
+ "memmap2",
+ "nvml-wrapper",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "common"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "crc32fast",
  "rkyv",
@@ -226,30 +267,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi",
-]
-
-[[package]]
-name = "gpustat4cluster-client-backend"
-version = "0.1.1"
-dependencies = [
- "base64",
- "chrono",
- "common",
- "serde",
- "serde_json",
- "socket2",
- "toml",
-]
-
-[[package]]
-name = "gpustat4cluster-client-cli"
-version = "0.1.1"
-dependencies = [
- "chrono",
- "common",
- "serde",
- "serde_json",
- "toml",
 ]
 
 [[package]]
@@ -584,23 +601,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
-]
-
-[[package]]
-name = "server"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "common",
- "memmap2",
- "nvml-wrapper",
- "serde",
- "serde_json",
- "socket2",
- "tempfile",
- "toml",
 ]
 
 [[package]]

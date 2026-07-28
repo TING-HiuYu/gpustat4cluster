@@ -6,12 +6,12 @@ TMP_DIR=""
 SERVER_PID=""
 BACKEND_PID=""
 
-SERVER_QUERY_ADDR="${GPUSTAT4CLUSTER_SMOKE_QUERY_ADDR:-127.0.0.1:4622}"
-TEST_HOSTNAME="${GPUSTAT4CLUSTER_SMOKE_TEST_HOSTNAME:-test-smoke-node}"
-SERVER_PORT_START="${GPUSTAT4CLUSTER_SMOKE_PORT_START:-39200}"
-SERVER_PORT_END="${GPUSTAT4CLUSTER_SMOKE_PORT_END:-39210}"
-MULTICAST_ADDR="${GPUSTAT4CLUSTER_SMOKE_MULTICAST_ADDR:-239.0.0.1:4400}"
-PORT_RELEASE_TIMEOUT_SECS="${GPUSTAT4CLUSTER_SMOKE_PORT_RELEASE_TIMEOUT_SECS:-10}"
+SERVER_QUERY_ADDR="${CLUSTAT_SMOKE_QUERY_ADDR:-127.0.0.1:4622}"
+TEST_HOSTNAME="${CLUSTAT_SMOKE_TEST_HOSTNAME:-test-smoke-node}"
+SERVER_PORT_START="${CLUSTAT_SMOKE_PORT_START:-39200}"
+SERVER_PORT_END="${CLUSTAT_SMOKE_PORT_END:-39210}"
+MULTICAST_ADDR="${CLUSTAT_SMOKE_MULTICAST_ADDR:-239.0.0.1:4400}"
+PORT_RELEASE_TIMEOUT_SECS="${CLUSTAT_SMOKE_PORT_RELEASE_TIMEOUT_SECS:-10}"
 CLIENT_BACKEND_SOCKET=""
 
 log() {
@@ -75,7 +75,7 @@ reap_known_listener() {
     args="$(ps -o args= -p "$pid" 2>/dev/null || true)"
     [[ "$owner" == "$USER" ]] || continue
     case "$args" in
-      *"target/debug/server"*|*"target/debug/gpustat4cluster-client-backend"*|*"python3 -"*)
+      *"target/debug/clustat-server"*|*"target/debug/clustat-backend"*|*"python3 -"*)
         stop_pid "$pid"
         ;;
     esac
@@ -171,7 +171,7 @@ build_binaries() {
   log "building debug binaries"
   (
     cd "$ROOT_DIR"
-    cargo build --locked -p server -p gpustat4cluster-client-backend -p gpustat4cluster-client-cli
+    cargo build --locked -p clustat-server -p clustat-client-backend -p clustat-client-cli
   )
 }
 
@@ -275,8 +275,8 @@ main() {
   log "starting client-backend; multicast discovery may fall back to empty node list"
   (
     cd "$ROOT_DIR"
-    GPUSTAT4CLUSTER_CONFIG="$config_path" \
-      target/debug/gpustat4cluster-client-backend
+    CLUSTAT_CONFIG="$config_path" \
+      target/debug/clustat-backend
   ) >"$backend_log" 2>&1 &
   BACKEND_PID=$!
 
@@ -302,8 +302,8 @@ main() {
   log "running CLI against local backend"
   (
     cd "$ROOT_DIR"
-    GPUSTAT4CLUSTER_BACKEND_SOCKET="$CLIENT_BACKEND_SOCKET" \
-      target/debug/gpustat4cluster
+    CLUSTAT_BACKEND_SOCKET="$CLIENT_BACKEND_SOCKET" \
+      target/debug/clustat
   ) >"$cli_output" 2>&1 || {
     cat "$cli_output" >&2 || true
     fail "CLI command failed"

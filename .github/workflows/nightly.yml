@@ -45,25 +45,25 @@ jobs:
         run: cargo test --workspace
 
       - name: Run debug cargo test
-        run: cargo test -p server --features debug --no-default-features
+        run: cargo test -p clustat-server --features debug --no-default-features
 
       - name: Build production binaries
         run: |
-          cargo build --locked --release -p server --features nvml
-          cargo build --locked --release -p gpustat4cluster-client-backend -p gpustat4cluster-client-cli
+          cargo build --locked --release -p clustat-server --features nvml
+          cargo build --locked --release -p clustat-client-backend -p clustat-client-cli
 
       - name: Build debug server binary
-        run: cargo build --locked -p server --features debug --no-default-features
+        run: cargo build --locked -p clustat-server --features debug --no-default-features
 
       - name: Build e2e test binaries
         run: |
-          cargo build --locked --release -p server --features debug --no-default-features
-          cargo build --locked --release -p gpustat4cluster-client-backend --features debug
-          cargo build --locked --release -p gpustat4cluster-client-cli
+          cargo build --locked --release -p clustat-server --features debug --no-default-features
+          cargo build --locked --release -p clustat-client-backend --features debug
+          cargo build --locked --release -p clustat-client-cli
           mkdir -p e2e-bin
-          cp target/release/server e2e-bin/server
-          cp target/release/gpustat4cluster-client-backend e2e-bin/gpustat4cluster-client-backend
-          cp target/release/gpustat4cluster e2e-bin/gpustat4cluster
+          cp target/release/clustat-server e2e-bin/clustat-server
+          cp target/release/clustat-backend e2e-bin/clustat-backend
+          cp target/release/clustat e2e-bin/clustat
 
       - name: Upload e2e test binaries
         uses: actions/upload-artifact@v7
@@ -119,9 +119,9 @@ jobs:
       - name: Run ${{ matrix.name }}
         run: |
           E2E_SKIP_BUILD=1 \
-          SERVER_BIN=/work/e2e-bin/server \
-          BACKEND_BIN=/work/e2e-bin/gpustat4cluster-client-backend \
-          CLIENT_BIN=/work/e2e-bin/gpustat4cluster \
+          SERVER_BIN=/work/e2e-bin/clustat-server \
+          BACKEND_BIN=/work/e2e-bin/clustat-backend \
+          CLIENT_BIN=/work/e2e-bin/clustat \
           scripts/e2e-docker-run.sh ${{ matrix.script }}
 
   e2e-dynamic-scale:
@@ -161,9 +161,9 @@ jobs:
         run: |
           E2E_SCALE_GROUP=${{ matrix.group }} \
           E2E_SKIP_BUILD=1 \
-          SERVER_BIN=/work/e2e-bin/server \
-          BACKEND_BIN=/work/e2e-bin/gpustat4cluster-client-backend \
-          CLIENT_BIN=/work/e2e-bin/gpustat4cluster \
+          SERVER_BIN=/work/e2e-bin/clustat-server \
+          BACKEND_BIN=/work/e2e-bin/clustat-backend \
+          CLIENT_BIN=/work/e2e-bin/clustat \
           scripts/e2e-docker-run.sh scripts/e2e-dynamic-scale.sh
 
   e2e-robustness:
@@ -207,7 +207,7 @@ jobs:
         run: |
           E2E_ROBUSTNESS_GROUP=${{ matrix.group }} \
           E2E_SKIP_BUILD=1 \
-          SERVER_BIN=/work/e2e-bin/server \
-          BACKEND_BIN=/work/e2e-bin/gpustat4cluster-client-backend \
-          CLIENT_BIN=/work/e2e-bin/gpustat4cluster \
+          SERVER_BIN=/work/e2e-bin/clustat-server \
+          BACKEND_BIN=/work/e2e-bin/clustat-backend \
+          CLIENT_BIN=/work/e2e-bin/clustat \
           scripts/e2e-docker-run.sh scripts/e2e-robustness.sh

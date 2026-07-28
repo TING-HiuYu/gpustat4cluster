@@ -2,16 +2,16 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SERVER_BIN="${SERVER_BIN:-$ROOT_DIR/target/release/server}"
-BACKEND_BIN="${BACKEND_BIN:-$ROOT_DIR/target/release/gpustat4cluster-client-backend}"
-CLIENT_BIN="${CLIENT_BIN:-$ROOT_DIR/target/release/gpustat4cluster}"
+SERVER_BIN="${SERVER_BIN:-$ROOT_DIR/target/release/clustat-server}"
+BACKEND_BIN="${BACKEND_BIN:-$ROOT_DIR/target/release/clustat-backend}"
+CLIENT_BIN="${CLIENT_BIN:-$ROOT_DIR/target/release/clustat}"
 E2E_TMP_ROOT="${E2E_TMP_ROOT:-$(mktemp -d)}"
 E2E_PIDS=()
 E2E_CONTAINERS=()
 E2E_LAST_PID=""
 E2E_RUN_ID="${E2E_RUN_ID:-$(basename "$E2E_TMP_ROOT" | tr -c 'A-Za-z0-9_.-' '-')}"
 E2E_NODE_MODE="${E2E_NODE_MODE:-local}"
-E2E_NODE_IMAGE="${E2E_NODE_IMAGE:-gpustat4cluster-e2e-node:local}"
+E2E_NODE_IMAGE="${E2E_NODE_IMAGE:-clustat-e2e-node:local}"
 E2E_DOCKER_NETWORK="${E2E_DOCKER_NETWORK:-}"
 declare -A E2E_SERVER_BY_TCP=()
 declare -A E2E_SERVER_BY_UDP=()
@@ -44,7 +44,7 @@ trap cleanup_e2e EXIT
 
 require_binaries() {
   if [[ "${E2E_SKIP_BUILD:-0}" != "1" ]]; then
-    (cd "$ROOT_DIR" && cargo build --locked --release -p server --features debug --no-default-features && cargo build --locked --release -p gpustat4cluster-client-backend --features debug && cargo build --locked --release -p gpustat4cluster-client-cli)
+    (cd "$ROOT_DIR" && cargo build --locked --release -p clustat-server --features debug --no-default-features && cargo build --locked --release -p clustat-client-backend --features debug && cargo build --locked --release -p clustat-client-cli)
   fi
   for bin in "$SERVER_BIN" "$BACKEND_BIN" "$CLIENT_BIN"; do
     [[ -x "$bin" ]] || { echo "required e2e binary is missing or not executable: $bin" >&2; exit 127; }
@@ -54,7 +54,7 @@ require_binaries() {
       docker build -f "$ROOT_DIR/docker/e2e-node.Dockerfile" -t "$E2E_NODE_IMAGE" "$ROOT_DIR"
     }
     if [[ -z "$E2E_DOCKER_NETWORK" ]]; then
-      E2E_DOCKER_NETWORK="g4c-e2e-$E2E_RUN_ID"
+      E2E_DOCKER_NETWORK="clustat-e2e-$E2E_RUN_ID"
       docker network create "$E2E_DOCKER_NETWORK" >/dev/null
     elif ! docker network inspect "$E2E_DOCKER_NETWORK" >/dev/null 2>&1; then
       docker network create "$E2E_DOCKER_NETWORK" >/dev/null
@@ -211,21 +211,21 @@ EOF_CFG
 start_server() {
   local config="$1" log="$2"
   if [[ "$E2E_NODE_MODE" == "docker" ]]; then
-    start_container "server" "$(server_container_name "$config")" "$log" GPUSTAT4CLUSTER_CONFIG="$config" "$SERVER_BIN"
+    start_container "server" "$(server_container_name "$config")" "$log" CLUSTAT_CONFIG="$config" "$SERVER_BIN"
     return
   fi
-  GPUSTAT4CLUSTER_CONFIG="$config" "$SERVER_BIN" >"$log" 2>&1 &
+  CLUSTAT_CONFIG="$config" "$SERVER_BIN" >"$log" 2>&1 &
   E2E_PIDS+=("$!")
 }
 
 start_server_pid() {
   local config="$1" log="$2"
   if [[ "$E2E_NODE_MODE" == "docker" ]]; then
-    start_container "server" "$(server_container_name "$config")" "$log" GPUSTAT4CLUSTER_CONFIG="$config" "$SERVER_BIN"
+    start_container "server" "$(server_container_name "$config")" "$log" CLUSTAT_CONFIG="$config" "$SERVER_BIN"
     E2E_LAST_PID="$(server_container_name "$config")"
     return
   fi
-  GPUSTAT4CLUSTER_CONFIG="$config" "$SERVER_BIN" >"$log" 2>&1 &
+  CLUSTAT_CONFIG="$config" "$SERVER_BIN" >"$log" 2>&1 &
   local pid="$!"
   E2E_PIDS+=("$pid")
   E2E_LAST_PID="$pid"
@@ -239,16 +239,16 @@ start_backend() {
     register_server_configs_from_tmp
     translated_static_nodes="$(translate_static_nodes "$static_nodes")"
     if [[ -n "$translated_static_nodes" ]]; then
-      start_container "backend" "$container_name" "$log" GPUSTAT4CLUSTER_CONFIG="$config" GPUSTAT4CLUSTER_STATIC_NODES="$translated_static_nodes" "$BACKEND_BIN"
+      start_container "backend" "$container_name" "$log" CLUSTAT_CONFIG="$config" CLUSTAT_STATIC_NODES="$translated_static_nodes" "$BACKEND_BIN"
     else
-      start_container "backend" "$container_name" "$log" GPUSTAT4CLUSTER_CONFIG="$config" "$BACKEND_BIN"
+      start_container "backend" "$container_name" "$log" CLUSTAT_CONFIG="$config" "$BACKEND_BIN"
     fi
     return
   fi
   if [[ -n "$static_nodes" ]]; then
-    GPUSTAT4CLUSTER_CONFIG="$config" GPUSTAT4CLUSTER_STATIC_NODES="$static_nodes" "$BACKEND_BIN" >"$log" 2>&1 &
+    CLUSTAT_CONFIG="$config" CLUSTAT_STATIC_NODES="$static_nodes" "$BACKEND_BIN" >"$log" 2>&1 &
   else
-    GPUSTAT4CLUSTER_CONFIG="$config" "$BACKEND_BIN" >"$log" 2>&1 &
+    CLUSTAT_CONFIG="$config" "$BACKEND_BIN" >"$log" 2>&1 &
   fi
   E2E_PIDS+=("$!")
 }
@@ -262,17 +262,17 @@ start_backend_pid() {
     register_server_configs_from_tmp
     translated_static_nodes="$(translate_static_nodes "$static_nodes")"
     if [[ -n "$translated_static_nodes" ]]; then
-      start_container "backend" "$container_name" "$log" GPUSTAT4CLUSTER_CONFIG="$config" GPUSTAT4CLUSTER_STATIC_NODES="$translated_static_nodes" "$BACKEND_BIN"
+      start_container "backend" "$container_name" "$log" CLUSTAT_CONFIG="$config" CLUSTAT_STATIC_NODES="$translated_static_nodes" "$BACKEND_BIN"
     else
-      start_container "backend" "$container_name" "$log" GPUSTAT4CLUSTER_CONFIG="$config" "$BACKEND_BIN"
+      start_container "backend" "$container_name" "$log" CLUSTAT_CONFIG="$config" "$BACKEND_BIN"
     fi
     E2E_LAST_PID="$container_name"
     return
   fi
   if [[ -n "$static_nodes" ]]; then
-    GPUSTAT4CLUSTER_CONFIG="$config" GPUSTAT4CLUSTER_STATIC_NODES="$static_nodes" "$BACKEND_BIN" >"$log" 2>&1 &
+    CLUSTAT_CONFIG="$config" CLUSTAT_STATIC_NODES="$static_nodes" "$BACKEND_BIN" >"$log" 2>&1 &
   else
-    GPUSTAT4CLUSTER_CONFIG="$config" "$BACKEND_BIN" >"$log" 2>&1 &
+    CLUSTAT_CONFIG="$config" "$BACKEND_BIN" >"$log" 2>&1 &
   fi
   local pid="$!"
   E2E_PIDS+=("$pid")
@@ -353,7 +353,7 @@ assert_query_latency() {
   python3 - "$CLIENT_BIN" "$uds" "$max_first_us" "$avg_max_us" "$out" <<'PY'
 import json, os, subprocess, sys, time
 client, uds, first_limit, avg_limit, out = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
-env = os.environ.copy(); env['GPUSTAT4CLUSTER_BACKEND_SOCKET'] = uds
+env = os.environ.copy(); env['CLUSTAT_BACKEND_SOCKET'] = uds
 samples=[]
 def max_delay_us(payload):
     data = json.loads(payload)
@@ -472,14 +472,14 @@ server_container_name() {
   local config="$1"
   local base
   base="$(basename "$(dirname "$config")" | tr -c 'A-Za-z0-9_.-' '-')"
-  echo "g4c-$E2E_RUN_ID-server-$base"
+  echo "clustat-$E2E_RUN_ID-server-$base"
 }
 
 backend_container_name() {
   local config="$1"
   local base
   base="$(basename "$(dirname "$config")" | tr -c 'A-Za-z0-9_.-' '-')"
-  echo "g4c-$E2E_RUN_ID-backend-$base"
+  echo "clustat-$E2E_RUN_ID-backend-$base"
 }
 
 start_container() {
@@ -585,7 +585,7 @@ wait_for_log() {
 
 client_query_json() {
   local uds="$1" out="$2"
-  timeout "${E2E_QUERY_TIMEOUT_SECS:-3}" env GPUSTAT4CLUSTER_BACKEND_SOCKET="$uds" "$CLIENT_BIN" --json >"$out" 2>"$out.err"
+  timeout "${E2E_QUERY_TIMEOUT_SECS:-3}" env CLUSTAT_BACKEND_SOCKET="$uds" "$CLIENT_BIN" --json >"$out" 2>"$out.err"
 }
 
 query_until() {

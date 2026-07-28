@@ -8,8 +8,8 @@ fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$1"
-RUN_ID="${E2E_RUN_ID:-g4c-$(date +%s)-$$}"
-NODE_IMAGE="${E2E_NODE_IMAGE:-gpustat4cluster-e2e-node:local}"
+RUN_ID="${E2E_RUN_ID:-clustat-$(date +%s)-$$}"
+NODE_IMAGE="${E2E_NODE_IMAGE:-clustat-e2e-node:local}"
 
 normalize_path() {
   local value="$1"
@@ -20,9 +20,9 @@ normalize_path() {
   fi
 }
 
-SERVER_BIN_PATH="$(normalize_path "${SERVER_BIN:-$ROOT_DIR/target/release/server}")"
-BACKEND_BIN_PATH="$(normalize_path "${BACKEND_BIN:-$ROOT_DIR/target/release/gpustat4cluster-client-backend}")"
-CLIENT_BIN_PATH="$(normalize_path "${CLIENT_BIN:-$ROOT_DIR/target/release/gpustat4cluster}")"
+SERVER_BIN_PATH="$(normalize_path "${SERVER_BIN:-$ROOT_DIR/target/release/clustat-server}")"
+BACKEND_BIN_PATH="$(normalize_path "${BACKEND_BIN:-$ROOT_DIR/target/release/clustat-backend}")"
+CLIENT_BIN_PATH="$(normalize_path "${CLIENT_BIN:-$ROOT_DIR/target/release/clustat}")"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is required to run containerized e2e tests" >&2
