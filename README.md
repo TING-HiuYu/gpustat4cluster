@@ -29,8 +29,7 @@ compute node                         login/user node
 +---------------------------+                       | UDS
                                                     v
                                       +-----------------------------+
-                                      | clustat                     |
-                                      | gpustat-inspired CLI UI     |
+                                      | clustat CLI UI              |
                                       +-----------------------------+
 ```
 
@@ -282,6 +281,24 @@ Key features:
 - In addition to the familiar `gpustat` experience, clustat adds `-user <USER>` and `-n <NODE_FILTER>` filters.
 - Watch mode supports refresh intervals down to 50ms, for example `-i 0.05`.
 - deb/rpm/Arch packages install and enable systemd services; if the client package does not find an existing `gpustat` command, it automatically creates the `gpustat -> clustat` symlink.
+
+## Architecture
+
+```text
+compute node                         login/user node
++---------------------------+        +-----------------------------+
+| clustat-server            | <----> | clustat-backend             |
+| - GRES/NVML collector     | UDP/TCP| - multicast discovery       |
+| - collector cache         |        | - persistent node cache     |
+| - multicast announce      |        | - UDS frontend API          |
+| - UDP listener            |        +--------------+--------------+
+| - TCP listener            |                       |
++---------------------------+                       | UDS
+                                                    v
+                                      +-----------------------------+
+                                      | clustat CLI UI              |
+                                      +-----------------------------+
+```
 
 ## Installation
 
